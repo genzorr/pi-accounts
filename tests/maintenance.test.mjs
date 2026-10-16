@@ -13,7 +13,7 @@ function fixture(t, platform = 'linux') {
   const calls = [], messages = [], errors = [];
   let loaded = false;
   const runtime = { node: '/node path/node', cli: '/npm path/pi-accounts/src/cli.mjs', piPackageDir: '/Pi package', agentDir: join(home, 'agent data') };
-  const options = { home, platform, runtime, uid: 501, log: line => messages.push(line), error: line => errors.push(line), run: (command, args) => {
+  const options = { home, platform, runtime, loadPi: async descriptor => ({ root: descriptor?.packageDir || '/managed active package' }), uid: 501, log: line => messages.push(line), error: line => errors.push(line), run: (command, args) => {
     calls.push([command, ...args]);
     if (command === 'launchctl') {
       if (args[0] === 'print') return { code: loaded ? 0 : 113, stdout: loaded ? 'state = waiting\n' : '', stderr: '' };
@@ -170,4 +170,69 @@ supportedTest('enable failure re-pauses and stale runner markers require explici
   writeFileSync(join(f.dir, 'running/pid'), '999999');
   assert.equal(await f.exec(['install']), 1);
   assert.equal(existsSync(join(f.dir, 'running/pid')), true);
+});
+
+
+supportedTest('managed install capture and status retain stable root with strict optional path validation', async t => {
+  const f = fixture(t);
+  delete f.options.runtime;
+  f.options.loadPi = async descriptor => {
+    assert.equal(descriptor, undefined);
+    return { root: '/managed/install/releases/1.3.0/node_modules/pi', managedInstallRoot: '/managed/install', resolvePath: value => join(f.home, value) };
+  };
+  assert.equal(await f.exec(['install']), 0, f.errors.join('\n'));
+  const statePath = join(f.dir, 'state.json');
+  const state = JSON.parse(readFileSync(statePath));
+  assert.equal(state.runtime.managedInstallRoot, '/managed/install');
+  assert.equal(state.runtime.piPackageDir, '/managed/install/releases/1.3.0/node_modules/pi');
+  assert.equal(await f.exec(['status']), 0);
+  assert.ok(f.messages.some(message => message.includes('Pi source: managed /managed/install')));
+  state.runtime.managedInstallRoot = 'relative/install';
+  writeFileSync(statePath, JSON.stringify(state));
+  assert.equal(await f.exec(['run']), 1);
+});
+
+supportedTest('managed scheduled refresh rechecks active source and never falls back to retained release or ambient override', async t => {
+  const f = fixture(t);
+  f.options.runtime = { ...f.runtime, managedInstallRoot: '/managed/install' };
+  assert.equal(await f.exec(['install']), 0);
+  assert.equal(await f.exec(['enable']), 0);
+  let active = '/managed/install/releases/current/node_modules/pi';
+  let supported = true;
+  let refreshes = 0;
+  f.options.loadPi = async descriptor => {
+    assert.deepEqual(descriptor, { managedInstallRoot: '/managed/install' });
+    if (!supported) throw new Error('unsupported active version; retained reviewed release still exists');
+    return { root: active };
+  };
+  f.options.refresh = async runtime => { refreshes++; assert.equal(runtime.piPackageDir, active); return 0; };
+  const original = process.env.PI_PACKAGE_DIR;
+  process.env.PI_PACKAGE_DIR = '/wrong/ambient/package';
+  try {
+    assert.equal(await f.exec(['run']), 0);
+    active = '/managed/install/releases/switched/node_modules/pi';
+    assert.equal(await f.exec(['run']), 0);
+    supported = false;
+    assert.equal(await f.exec(['run']), 1);
+    assert.equal(refreshes, 2, 'unsupported active release must stop before spawning refresh');
+    assert.equal(existsSync(join(f.dir, 'running')), false);
+  } finally {
+    if (original === undefined) delete process.env.PI_PACKAGE_DIR;
+    else process.env.PI_PACKAGE_DIR = original;
+  }
+});
+
+supportedTest('legacy four-field maintenance state remains fixed-package intent and fails before refresh on SDK error', async t => {
+  const f = fixture(t);
+  await f.exec(['install']); await f.exec(['enable']);
+  let refreshes = 0;
+  f.options.loadPi = async descriptor => {
+    assert.deepEqual(descriptor, { packageDir: f.runtime.piPackageDir });
+    throw new Error('captured package unavailable');
+  };
+  f.options.refresh = async () => { refreshes++; return 0; };
+  assert.equal(await f.exec(['run']), 1);
+  assert.equal(refreshes, 0);
+  assert.equal(await f.exec(['status']), 0);
+  assert.ok(f.messages.some(message => message.includes('Pi source: fixed package')));
 });

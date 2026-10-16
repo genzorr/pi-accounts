@@ -1,6 +1,6 @@
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { AccountError } from './accounts.mjs';
@@ -12,20 +12,7 @@ export function assertSupportedNode(version = process.versions.node) {
   }
 }
 
-async function packageFromPath() {
-  let executable;
-  for (const directory of (process.env.PATH || '').split(delimiter)) {
-    const candidate = resolve(directory || '.', 'pi');
-    try {
-      await access(candidate, constants.X_OK);
-      if (!(await stat(candidate)).isFile()) continue;
-      executable = await realpath(candidate);
-      break;
-    } catch (error) {
-      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
-    }
-  }
-  if (!executable) throw new AccountError('Pi command not found on PATH; install Pi 1.3.0 or set PI_PACKAGE_DIR to its package directory');
+async function packageAncestor(executable) {
   let root = dirname(executable);
   while (true) {
     try {
@@ -33,17 +20,84 @@ async function packageFromPath() {
       if (pkg.name === '@earendil-works/pi-coding-agent') return root;
     } catch {}
     const parent = dirname(root);
-    if (parent === root) throw new AccountError('Pi command does not resolve inside its npm package; set PI_PACKAGE_DIR to the Pi 1.3.0 package directory');
+    if (parent === root) return;
     root = parent;
   }
 }
 
-export async function loadPi() {
+async function managedMarker(root) {
+  let data;
+  try { data = await readFile(join(root, 'managed-install.json'), 'utf8'); }
+  catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false; throw error; }
+  let marker;
+  try { marker = JSON.parse(data); } catch {}
+  if (marker?.kind !== 'pi-managed-install' || marker.schemaVersion !== 1 || marker.layout !== 'releases-v1') {
+    throw new AccountError('Invalid managed Pi installation marker; repair the official Pi installation');
+  }
+  return true;
+}
+
+async function managedPackage(root) {
+  let version;
+  try { version = (await readFile(join(root, 'current-version'), 'utf8')).split('\n')[0]; }
+  catch { throw new AccountError('Cannot read managed Pi current-version; repair the official Pi installation'); }
+  if (!/^[A-Za-z0-9._+-]+$/.test(version) || version === '.' || version === '..') {
+    throw new AccountError('Invalid managed Pi current-version; repair the official Pi installation');
+  }
+  const executable = join(root, 'releases', version, 'node_modules', '.bin', 'pi');
+  let packageDir;
+  try {
+    await access(executable, constants.X_OK);
+    if ((await stat(executable)).isFile()) packageDir = await packageAncestor(await realpath(executable));
+  } catch {}
+  if (!packageDir) throw new AccountError('Managed Pi active release is missing its native npm package; repair the official Pi installation');
+  return { root: packageDir, managedInstallRoot: root };
+}
+
+async function packageFromPath() {
+  let command;
+  let executable;
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    const candidate = resolve(directory || '.', 'pi');
+    try {
+      await access(candidate, constants.X_OK);
+      if (!(await stat(candidate)).isFile()) continue;
+      executable = await realpath(candidate);
+      command = candidate;
+      break;
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+    }
+  }
+  if (!executable) throw new AccountError('Pi command not found on PATH; install Pi 1.3.0 or set PI_PACKAGE_DIR to its package directory');
+  const candidates = [dirname(command)];
+  if (basename(executable) === 'pi' && basename(dirname(executable)) === 'bin') candidates.push(join(dirname(dirname(executable)), 'install'));
+  for (const root of candidates) if (await managedMarker(root)) return managedPackage(root);
+  const root = await packageAncestor(executable);
+  if (!root) throw new AccountError('Pi command is not a supported official managed installation or npm package; repair Pi or set PI_PACKAGE_DIR to its Pi 1.3.0 package directory');
+  return { root };
+}
+
+export async function loadPi(options = {}) {
   assertSupportedNode();
-  const root = process.env.PI_PACKAGE_DIR ? resolve(process.env.PI_PACKAGE_DIR) : await packageFromPath();
+  const managed = options.managedInstallRoot !== undefined;
+  const bound = options.packageDir !== undefined;
+  if (managed && bound) throw new AccountError('Choose one Pi installation: managedInstallRoot or packageDir');
+  if ((managed || bound) && (typeof (managed ? options.managedInstallRoot : options.packageDir) !== 'string' || !(managed ? options.managedInstallRoot : options.packageDir))) {
+    throw new AccountError('Pi installation paths must be nonempty strings');
+  }
+  let location;
+  if (managed) {
+    const managedRoot = resolve(options.managedInstallRoot);
+    if (!(await managedMarker(managedRoot))) throw new AccountError('Managed Pi installation marker is missing; repair the official Pi installation');
+    location = await managedPackage(managedRoot);
+  } else if (bound) location = { root: resolve(options.packageDir) };
+  else location = process.env.PI_PACKAGE_DIR ? { root: resolve(process.env.PI_PACKAGE_DIR) } : await packageFromPath();
+  const { root, managedInstallRoot } = location;
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   if (pkg.name !== '@earendil-works/pi-coding-agent' || pkg.version !== '1.3.0') {
-    throw new AccountError('This account tool requires reviewed Pi 1.3.0; revalidate refresh locking before upgrading');
+    const version = typeof pkg.version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(pkg.version) ? pkg.version : 'an unsupported package';
+    throw new AccountError(`This account tool requires reviewed Pi 1.3.0; found ${version}. Revalidate refresh locking before upgrading`);
   }
   const load = (file) => import(pathToFileURL(join(root, file)).href);
   let aiRoot;
@@ -60,5 +114,5 @@ export async function loadPi() {
   const { FileAuthStorageBackend, AuthStorage } = await load('dist/core/auth-storage.js');
   const { resolvePath } = await load('dist/utils/paths.js');
   const { openaiCodexOAuth } = await import(pathToFileURL(join(aiRoot, 'dist/auth/oauth/openai-codex.js')).href);
-  return { FileAuthStorageBackend, AuthStorage, oauth: openaiCodexOAuth, resolvePath, root, aiRoot };
+  return { FileAuthStorageBackend, AuthStorage, oauth: openaiCodexOAuth, resolvePath, root, aiRoot, ...(managedInstallRoot ? { managedInstallRoot } : {}) };
 }

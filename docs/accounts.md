@@ -1,6 +1,6 @@
 # Pi accounts
 
-`pi-accounts` is a standalone Pi-only account CLI. It uses the installed Pi 1.3.0 OpenAI OAuth implementation, keeps the canonical `openai-codex` provider, and leaves model, effort, sessions, settings, Codex and CMA unchanged. Each saved account needs its own Pi-owned login. It refuses an existing unmanaged native Pi credential instead of importing shared refresh tokens. There is no automatic account rotation or inference proxy.
+`pi-accounts` is a standalone Pi-only account CLI. It uses the installed Pi 1.3.0 native auth storage and OpenAI OAuth implementation, keeps the canonical `openai-codex` provider, and leaves model, effort, sessions, settings, Codex and CMA unchanged. Each saved account needs its own Pi-owned login. It refuses an existing unmanaged native Pi credential instead of importing shared refresh tokens. There is no automatic account rotation or inference proxy.
 
 ## Commands
 
@@ -33,9 +33,13 @@ Email is optional, unverified display metadata obtained from a native credential
 
 ## Runtime and installation
 
-See the [README](../README.md) for package installation, maintenance activation and rollback. The package exposes `src/cli.mjs` as `pi-accounts` and carries its sibling modules together; it has no additional npm runtime dependencies. Node.js >=22.19.0, Pi `@earendil-works/pi-coding-agent` 1.3.0 and its matching `@earendil-works/pi-ai` 1.3.0 are required. The SDK checks versions before importing native Pi primitives; these versions remain pinned until refresh-lock semantics and internal module paths are reviewed again.
+See the [README](../README.md) for package installation and maintenance activation; update and removal commands are below. The package exposes `src/cli.mjs` as `pi-accounts` and carries its sibling modules together; it has no additional npm runtime dependencies. Node.js >=22.19.0, Pi `@earendil-works/pi-coding-agent` 1.3.0 and its matching `@earendil-works/pi-ai` 1.3.0 are required. The SDK checks versions before importing native Pi primitives; these versions remain pinned until refresh-lock semantics and internal module paths are reviewed again.
 
-The tool searches `PATH` for the first executable `pi`, follows its executable symlink and ascends to the Pi npm package. This supports normal Linux and macOS npm bin-to-package layouts without a particular home prefix. Set `PI_PACKAGE_DIR` to the package directory when `pi` is a shell wrapper or is absent from `PATH`; the override takes precedence. Pi's OAuth dependency follows Node's package search order from that package, supporting both nested and hoisted npm dependencies. Discovery does not execute `pi`. Synthetic tests qualify relocated CLI/npm layouts on Linux; actual macOS execution remains unverified.
+The tool searches `PATH` for the first executable `pi`, follows executable symlinks, and supports both npm installations and the [current official curl installer](https://pi.dev/install.sh)'s managed launcher. For the managed launcher, it validates `install/managed-install.json`, reads the active `install/current-version`, and follows that release's native `node_modules/.bin/pi` to its package. Custom installation roots and symlinked launchers work; discovery derives the installation from the actual command, not ambient `PI_CODING_AGENT_DIR` or `PI_MANAGED_INSTALL_ROOT`. A valid managed marker beside the command is also supported. Marker `entrypoint.path` metadata is not the active-release authority. Invalid markers, unsafe version names or a missing active release fail without selecting another Pi later on `PATH`.
+
+This supports normal Linux and macOS managed/npm layouts without a particular home prefix. `PI_PACKAGE_DIR` remains an optional intentional package binding and takes precedence over `PATH`; normal official managed discovery does not require it. Pi's OAuth dependency follows Node's package search order from the selected package, supporting both nested and hoisted npm dependencies. Discovery does not execute the launcher, run OAuth, download dependencies or change the installation. The active package and its pi-ai dependency must both be reviewed version 1.3.0. A newer installed Pi produces a compatibility error with the detected version; do not downgrade or relogin merely to repair discovery. The user's installed version cannot be inferred from the latest installer release. Synthetic tests qualify custom managed layouts and relocated npm layouts on Linux. An isolated Linux trial using the official 1.3.0 installer package/lock, its downloaded native dependencies and the exact managed launcher passed local status, empty refresh and help without a package override. Actual macOS execution remains unverified.
+
+Maintenance installed against a managed launcher records its durable managed root and resolves `current-version` afresh for each scheduled refresh. It refuses an unsupported newly active version instead of refreshing through a retained old release. Existing maintenance records and installations created with `PI_PACKAGE_DIR` remain intentionally bound to that package. Pause maintenance, wait for an active runner to finish, remove the intentional override if appropriate, and reinstall its configuration through the update procedure below to capture the managed root. Package installation and this discovery fix do not reactivate maintenance automatically.
 
 `PI_CODING_AGENT_DIR` selects Pi's agent home, default `~/.pi/agent`. The CLI resolves it once through Pi's native `resolvePath`: `~` and `~/...` expand to the user home, `file://` URLs become filesystem paths, and relative paths resolve from the current working directory. The resulting absolute path is shared by reads, locks and writes; paths are not trimmed or canonicalized through symlinks. Set the same home for Pi, its subagents and this CLI. Native credentials remain in `auth.json`; saved accounts live in `accounts/pool.json`. New private directories use mode 0700 and private files use mode 0600. Existing parent-directory permissions and ACLs remain operator-owned. Installation must not copy credentials. Source-only scratch checks use:
 
@@ -45,7 +49,31 @@ PI_CODING_AGENT_DIR="$(mktemp -d)" node src/cli.mjs status
 node src/cli.mjs help
 ```
 
-Use `pi-accounts maintenance --help` and the [README](../README.md) for the native scheduler setup. Scheduled maintenance invokes the machine-readable refresh path hourly, with a boot delay and small jitter where the scheduler supports them. The fixed 75-minute threshold gives fifteen minutes of headroom beyond the hourly interval. A successful command reports each account as current or refreshed; any provider failure or unexpectedly short-lived replacement makes the command exit nonzero. Provider failures leave that account saved and continue to healthy accounts. Storage failures stop immediately. Check the service's exit status and journal after a failure. The maintenance module and README own the precise activation and rollback commands.
+Use `pi-accounts maintenance --help` and the [README](../README.md) for the native scheduler setup. Scheduled maintenance invokes the machine-readable refresh path hourly, with a boot delay and small jitter where the scheduler supports them. The fixed 75-minute threshold gives fifteen minutes of headroom beyond the hourly interval. A successful command reports each account as current or refreshed; any provider failure or unexpectedly short-lived replacement makes the command exit nonzero. Provider failures leave that account saved and continue to healthy accounts. Storage failures stop immediately. Check the service's exit status and journal after a failure. The README covers activation; the update and removal procedure below preserves account data.
+
+## Maintenance updates and removal
+
+Pause scheduling before replacing code or rebinding the Pi installation. If disable reports an active refresh, let it finish and repeat disable; it never kills a token refresh. Continue only when the runner is idle and disable succeeds:
+
+```bash
+pi-accounts maintenance disable
+pi-accounts maintenance status
+pi-accounts maintenance uninstall
+npm install --global 'https://github.com/genzorr/pi-accounts/releases/download/v0.1.1/pi-accounts-0.1.1.tgz'
+pi-accounts maintenance install --dry-run
+pi-accounts maintenance install
+pi-accounts maintenance enable
+```
+
+For removal, disable and wait as above, then run:
+
+```bash
+pi-accounts maintenance uninstall --dry-run
+pi-accounts maintenance uninstall
+npm uninstall --global pi-accounts
+```
+
+Maintenance removal preserves credentials, selection, logs and its private pause/ownership tombstone. Modified or foreign service files remain conflicts. A stale `running/pid` marker blocks changes after a crash: inspect the PID and native service state, verify no associated refresh remains alive, then resolve that marker manually. Never remove it during token rotation. Run setup commands sequentially. Linux maintenance state lives under `~/.local/state/pi-accounts-maintenance`; macOS state lives under `~/Library/Application Support/pi-accounts/maintenance`. A sleeping or logged-out laptop cannot refresh; no wake or lingering configuration is added.
 
 ## Concurrency and session behavior
 

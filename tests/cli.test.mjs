@@ -176,6 +176,116 @@ for (const layout of ['nested', 'hoisted']) {
   });
 }
 
+async function managedFixture(f, command) {
+  const agent = join(f.root, 'custom-managed-home');
+  const root = join(agent, 'install');
+  const packageDir = join(root, 'releases', '1.3.0', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  await cp(f.sdk, packageDir, { recursive: true });
+  await writeFile(join(packageDir, 'dist', 'cli.js'), '#!/usr/bin/env node\n');
+  await chmod(join(packageDir, 'dist', 'cli.js'), 0o755);
+  const releaseBin = join(root, 'releases', '1.3.0', 'node_modules', '.bin');
+  await mkdir(releaseBin);
+  await symlink('../@earendil-works/pi-coding-agent/dist/cli.js', join(releaseBin, 'pi'));
+  await writeFile(join(root, 'managed-install.json'), JSON.stringify({ kind: 'pi-managed-install', schemaVersion: 1, layout: 'releases-v1', entrypoint: { path: '/unused/stale-entrypoint' } }));
+  await writeFile(join(root, 'current-version'), '1.3.0\n');
+  const launcher = join(agent, 'bin', 'pi');
+  await mkdir(join(agent, 'bin'));
+  // Synthetic official managed layout; SDK discovery must not execute this launcher.
+  await writeFile(launcher, '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+  const bin = join(f.root, 'path-bin');
+  await mkdir(bin);
+  await symlink(launcher, join(bin, 'pi'));
+  const env = { ...f.env, HOME: join(f.root, 'isolated-home'), PATH: bin, PI_PACKAGE_DIR: '', PI_MANAGED_INSTALL_ROOT: '/unused/ambient-root' };
+  const run = (args, extra = {}) => spawnSync(process.execPath, [command, ...args], { cwd: f.root, env: { ...env, ...extra }, encoding: 'utf8' });
+  return { root, packageDir, launcher, bin, run };
+}
+
+test('official managed PATH launcher resolves its active native package without a global npm Pi or override', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  const managed = await managedFixture(f, command);
+  let result = managed.run(['status', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), []);
+  assert.match(await f.calls(), /sdk:auth/);
+  result = managed.run(['refresh', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), []);
+  assert.equal((await f.calls()).includes('provider:'), false);
+});
+
+test('managed discovery follows current-version updates and rejects an incompatible active release before SDK imports', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  const managed = await managedFixture(f, command);
+  const newer = join(managed.root, 'releases', '1.4.0');
+  await cp(join(managed.root, 'releases', '1.3.0'), newer, { recursive: true, verbatimSymlinks: true });
+  await writeFile(join(newer, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json'), '{"name":"@earendil-works/pi-coding-agent","version":"1.4.0","type":"module"}');
+  await writeFile(join(managed.root, 'current-version'), '1.4.0\n');
+  const result = managed.run(['status', '--json']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /reviewed Pi 1.3.0; found 1.4.0/);
+  assert.equal(await f.calls(), '');
+});
+
+test('managed descriptor failures do not skip to another npm Pi or access account stores', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  const managed = await managedFixture(f, command);
+  await writeFile(join(f.sdk, 'dist', 'cli.js'), '#!/usr/bin/env node\n');
+  await chmod(join(f.sdk, 'dist', 'cli.js'), 0o755);
+  const npmBin = join(f.root, 'fallback-npm-bin');
+  await mkdir(npmBin);
+  await symlink(join(f.sdk, 'dist', 'cli.js'), join(npmBin, 'pi'));
+  const path = `${managed.bin}${delimiter}${npmBin}`;
+  for (const version of ['', '.', '..', '../1.3.0', '1.3.0/extra', '1.3.0\r', ' 1.3.0', '1.3.0 ', 'missing']) {
+    await writeFile(join(managed.root, 'current-version'), version + '\n');
+    const result = managed.run(['status'], { PATH: path });
+    assert.notEqual(result.status, 0, version);
+    assert.match(result.stderr, /managed Pi|Managed Pi/);
+    assert.equal(await f.calls(), '');
+  }
+  await writeFile(join(managed.root, 'managed-install.json'), '{"kind":"foreign","schemaVersion":1,"layout":"releases-v1"}');
+  const result = managed.run(['status']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Invalid managed Pi installation marker/);
+  assert.equal(await f.calls(), '');
+});
+
+test('managed marker beside the PATH command is supported without trusting marker entrypoint metadata', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  const managed = await managedFixture(f, command);
+  await copyFile(join(managed.launcher), join(managed.root, 'pi'));
+  await chmod(join(managed.root, 'pi'), 0o755);
+  const result = managed.run(['status', '--json'], { PATH: managed.root });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), []);
+});
+
+test('explicit SDK discovery options override ambient package settings and reject ambiguous roots', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  const managed = await managedFixture(f, command);
+  const sdkModule = new URL('../src/pi-sdk.mjs', import.meta.url).href;
+  const probe = `import { loadPi } from ${JSON.stringify(sdkModule)};
+const sdk = await loadPi(JSON.parse(process.argv[1]));
+console.log(JSON.stringify({ root: sdk.root, managedInstallRoot: sdk.managedInstallRoot }));`;
+  const run = options => spawnSync(process.execPath, ['--input-type=module', '-e', probe, JSON.stringify(options)], { env: { ...f.env, PI_PACKAGE_DIR: '/unused/ambient-package', PATH: '', PI_MANAGED_INSTALL_ROOT: '/unused/ambient-managed' }, encoding: 'utf8' });
+  let result = run({ managedInstallRoot: managed.root });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { root: managed.packageDir, managedInstallRoot: managed.root });
+  result = run({ packageDir: f.sdk });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { root: f.sdk });
+  await writeFile(f.trace, '');
+  for (const options of [{ managedInstallRoot: managed.root, packageDir: f.sdk }, { managedInstallRoot: '' }, { packageDir: null }, { managedInstallRoot: join(f.root, 'missing-managed') }]) {
+    result = run(options);
+    assert.notEqual(result.status, 0);
+    assert.equal(await f.calls(), '');
+  }
+});
+
 test('incompatible Pi dependencies and an unsupported PATH wrapper fail before SDK imports', async t => {
   const f = await fixture(t);
   await writeFile(join(f.sdk, 'node_modules', '@earendil-works', 'pi-ai', 'package.json'), '{"name":"@earendil-works/pi-ai","version":"1.4.0","type":"module"}');

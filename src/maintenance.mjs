@@ -62,6 +62,16 @@ function render(platform, home, runtime) {
   const logs = join(home, 'Library/Logs/pi-accounts');
   return { [`${label}.plist`]: `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${label}</string>\n<key>ProgramArguments</key><array>${args.map(value => `<string>${xml(value)}</string>`).join('')}</array>\n<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string></dict>\n<key>StartInterval</key><integer>3600</integer>\n<key>RunAtLoad</key><true/>\n<key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>${xml(join(logs, 'maintenance.log'))}</string>\n<key>StandardErrorPath</key><string>${xml(join(logs, 'maintenance.error.log'))}</string>\n</dict></plist>\n` };
 }
+function validRuntime(runtime) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  const keys = Object.keys(runtime).sort().join(',');
+  return ['agentDir,cli,node,piPackageDir', 'agentDir,cli,managedInstallRoot,node,piPackageDir'].includes(keys)
+    && Object.values(runtime).every(value => typeof value === 'string' && isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value));
+}
+async function sdkLoader(options) {
+  return options.loadPi || (await import('./pi-sdk.mjs')).loadPi;
+}
+
 function native(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 15000 });
   if (result.error) fail(`Cannot run ${command}; check the user service manager`);
@@ -102,7 +112,7 @@ export async function runMaintenance(argv, options = {}) {
     let state = raw ? JSON.parse(raw.data) : null;
     if (state) {
       if (typeof state.installed !== 'boolean' || state.owner !== owner || state.platform !== platform || state.home !== home || !state.files || Object.keys(state.files).some(name => !names.includes(name)) || names.some(name => !Array.isArray(state.files[name]) || !state.files[name].length || state.files[name].some(sig => typeof sig !== 'string' || !/^[0-7]{3}:[a-f0-9]{64}$/.test(sig)))) fail('Invalid or foreign maintenance ownership state');
-      if (!state.runtime || Object.keys(state.runtime).sort().join(',') !== 'agentDir,cli,node,piPackageDir' || Object.values(state.runtime).some(value => typeof value !== 'string' || !isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value))) fail('Invalid maintenance runtime paths');
+      if (!validRuntime(state.runtime)) fail('Invalid maintenance runtime paths');
     }
     const readUnits = () => Object.fromEntries(names.map(name => [name, regular(safe(join(unitDir, name)))]));
     const owned = () => {
@@ -129,6 +139,7 @@ export async function runMaintenance(argv, options = {}) {
     if (command === 'status') {
       log(`Maintenance: ${state?.installed ? 'installed' : 'not installed'}; scheduling ${existsSync(paused) ? 'paused' : 'not paused'}; runner ${existsSync(running) ? 'active or stale marker (inspect before removal)' : 'idle'}`);
       if (state) {
+        log(state.runtime.managedInstallRoot ? `Pi source: managed ${state.runtime.managedInstallRoot}; active release is revalidated before each refresh` : `Pi source: fixed package ${state.runtime.piPackageDir}`);
         owned();
         const result = platform === 'linux' ? run('systemctl', ['--user', 'show', service, '--property=ActiveState', '--property=Result', '--property=ExecMainStatus']) : run('launchctl', ['print', target]);
         if (result.code === 0) {
@@ -147,19 +158,26 @@ export async function runMaintenance(argv, options = {}) {
         writeFileSync(join(running, 'pid'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
         if (options.afterLock) await options.afterLock();
         if (existsSync(paused)) return 0;
-        return await (options.refresh || refresh)(state.runtime);
+        let sdk;
+        try {
+          const loadPi = await sdkLoader(options);
+          sdk = await loadPi(state.runtime.managedInstallRoot ? { managedInstallRoot: state.runtime.managedInstallRoot } : { packageDir: state.runtime.piPackageDir });
+        } catch {
+          fail('Cannot validate captured Pi installation; scheduled refresh did not start. Check the active Pi version and maintenance installation');
+        }
+        return await (options.refresh || refresh)({ ...state.runtime, piPackageDir: sdk.root });
       } finally { rmSync(running, { recursive: true }); }
     }
     const current = owned();
     if (command === 'install') {
       let runtime = options.runtime;
       if (!runtime) {
-        const { loadPi } = await import('./pi-sdk.mjs');
+        const loadPi = await sdkLoader(options);
         const sdk = await loadPi();
-        runtime = { node: realpathSync(process.execPath), cli: realpathSync(fileURLToPath(new URL('./cli.mjs', import.meta.url))), piPackageDir: sdk.root, agentDir: sdk.resolvePath(process.env.PI_CODING_AGENT_DIR || join(home, '.pi/agent')) };
+        runtime = { node: realpathSync(process.execPath), cli: realpathSync(fileURLToPath(new URL('./cli.mjs', import.meta.url))), piPackageDir: sdk.root, agentDir: sdk.resolvePath(process.env.PI_CODING_AGENT_DIR || join(home, '.pi/agent')), ...(sdk.managedInstallRoot ? { managedInstallRoot: sdk.managedInstallRoot } : {}) };
       }
       runtime = Object.fromEntries(Object.entries(runtime).map(([key, value]) => [key, resolve(value)]));
-      if (Object.keys(runtime).sort().join(',') !== 'agentDir,cli,node,piPackageDir' || Object.values(runtime).some(value => /[\x00-\x1f\x7f]/.test(value))) fail('Invalid maintenance runtime paths');
+      if (!validRuntime(runtime)) fail('Invalid maintenance runtime paths');
       const desired = render(platform, home, runtime);
       if (state?.installed && !existsSync(paused)) fail('Disable maintenance and wait for its runner before updating service files');
       idle();
