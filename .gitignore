@@ -1,0 +1,8 @@
+node_modules/
+*.tgz
+*.log
+*.tmp
+*.recovery-*
+auth.json
+pool.json
+.DS_Store

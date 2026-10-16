@@ -1,0 +1,31 @@
+{
+  "name": "pi-accounts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Pi account selection and proactive OAuth maintenance",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "pi-accounts": "src/cli.mjs"
+  },
+  "files": [
+    "src/accounts.mjs",
+    "src/cli.mjs",
+    "src/pi-sdk.mjs",
+    "src/maintenance.mjs",
+    "docs/accounts.md",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/genzorr/pi-accounts.git"
+  }
+}

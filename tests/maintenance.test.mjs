@@ -1,0 +1,173 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runMaintenance } from '../src/maintenance.mjs';
+
+const supportedTest = ['linux', 'darwin'].includes(process.platform) ? test : test.skip;
+
+function fixture(t, platform = 'linux') {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'pi-maintenance ')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const calls = [], messages = [], errors = [];
+  let loaded = false;
+  const runtime = { node: '/node path/node', cli: '/npm path/pi-accounts/src/cli.mjs', piPackageDir: '/Pi package', agentDir: join(home, 'agent data') };
+  const options = { home, platform, runtime, uid: 501, log: line => messages.push(line), error: line => errors.push(line), run: (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'launchctl') {
+      if (args[0] === 'print') return { code: loaded ? 0 : 113, stdout: loaded ? 'state = waiting\n' : '', stderr: '' };
+      if (args[0] === 'bootstrap') loaded = true;
+      if (args[0] === 'bootout') loaded = false;
+    }
+    return { code: 0, stdout: 'ActiveState=inactive\nResult=success\nExecMainStatus=0\n', stderr: '' };
+  } };
+  const dir = platform === 'linux' ? join(home, '.local/state/pi-accounts-maintenance') : join(home, 'Library/Application Support/pi-accounts/maintenance');
+  const unitDir = platform === 'linux' ? join(home, '.config/systemd/user') : join(home, 'Library/LaunchAgents');
+  return { home, options, runtime, dir, unitDir, calls, messages, errors, exec: args => runMaintenance(args, options) };
+}
+
+supportedTest('help and invalid syntax have no runtime, storage or native-command effects', async t => {
+  const f = fixture(t);
+  for (const args of [[], ['help'], ['--help'], ['install', '--help']]) assert.equal(await f.exec(args), 0);
+  for (const args of [['wat'], ['install', '--force'], ['enable', '--dry-run'], ['run', 'extra'], ['install', '--dry-run', '--dry-run']]) assert.equal(await f.exec(args), 1);
+  assert.deepEqual(readdirSync(f.home), []);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const platform of ['linux', 'darwin']) supportedTest(`${platform} preview/install/reinstall/enable/disable/uninstall preserves accounts and supports reinstall`, async t => {
+  const f = fixture(t, platform);
+  const authDir = join(f.home, 'agent data/accounts');
+  mkdirSync(authDir, { recursive: true });
+  writeFileSync(join(authDir, 'pool.json'), '{"synthetic":"preserve"}');
+  assert.equal(await f.exec(['install', '--dry-run']), 0);
+  assert.equal(existsSync(f.dir), false);
+  assert.deepEqual(f.calls, []);
+  assert.equal(await f.exec(['install']), 0, f.errors.join('\n'));
+  const first = readdirSync(f.unitDir).map(name => [name, readFileSync(join(f.unitDir, name), 'utf8')]);
+  assert.equal(await f.exec(['install']), 0);
+  assert.deepEqual(readdirSync(f.unitDir).map(name => [name, readFileSync(join(f.unitDir, name), 'utf8')]), first);
+  assert.equal(await f.exec(['enable']), 0, f.errors.join('\n'));
+  assert.equal(await f.exec(['status']), 0);
+  assert.equal(await f.exec(['install']), 1, 'enabled maintenance must be paused before source changes');
+  assert.equal(await f.exec(['disable']), 0, f.errors.join('\n'));
+  const before = f.calls.length;
+  assert.equal(await f.exec(['uninstall', '--dry-run']), 0);
+  assert.equal(f.calls.length, before);
+  assert.equal(await f.exec(['uninstall']), 0, f.errors.join('\n'));
+  assert.deepEqual(readdirSync(f.unitDir), []);
+  assert.equal(readFileSync(join(authDir, 'pool.json'), 'utf8'), '{"synthetic":"preserve"}');
+  assert.equal(await f.exec(['run']), 0);
+  assert.equal(await f.exec(['install']), 0, 'retained pause/ownership tombstone must permit reinstall');
+  assert.equal(f.calls.some(call => call.includes('kill') || call.includes('stop')), false);
+  if (platform === 'linux') {
+    const text = first.find(([name]) => name.endsWith('.service'))[1];
+    assert.match(text, /ExecStart="\/node path\/node" "\/npm path\/pi-accounts\/src\/cli.mjs" "maintenance" "run"/);
+    assert.match(first.find(([name]) => name.endsWith('.timer'))[1], /OnUnitActiveSec=1h/);
+  } else {
+    const text = first[0][1];
+    assert.match(text, /<key>StartInterval<\/key><integer>3600<\/integer>/);
+    assert.match(text, /<string>\/node path\/node<\/string>/);
+  }
+});
+
+supportedTest('foreign and modified unit files are preserved before native effects', async t => {
+  const f = fixture(t);
+  mkdirSync(f.unitDir, { recursive: true });
+  const path = join(f.unitDir, 'pi-accounts-maintenance.service');
+  writeFileSync(path, 'foreign');
+  assert.equal(await f.exec(['install']), 1);
+  assert.equal(readFileSync(path, 'utf8'), 'foreign');
+  assert.equal(existsSync(f.dir), false);
+  assert.deepEqual(f.calls, []);
+  rmSync(path);
+  assert.equal(await f.exec(['install']), 0);
+  writeFileSync(path, 'modified');
+  assert.equal(await f.exec(['uninstall']), 1);
+  assert.equal(readFileSync(path, 'utf8'), 'modified');
+  assert.deepEqual(f.calls, []);
+});
+
+supportedTest('legacy Agents units are neither adopted nor overwritten', async t => {
+  const f = fixture(t);
+  mkdirSync(f.unitDir, { recursive: true });
+  writeFileSync(join(f.unitDir, 'pi-accounts-refresh.service'), 'legacy service');
+  writeFileSync(join(f.unitDir, 'pi-accounts-refresh.timer'), 'legacy timer');
+  assert.equal(await f.exec(['install']), 0);
+  assert.equal(await f.exec(['uninstall']), 0);
+  assert.equal(readFileSync(join(f.unitDir, 'pi-accounts-refresh.service'), 'utf8'), 'legacy service');
+  assert.equal(readFileSync(join(f.unitDir, 'pi-accounts-refresh.timer'), 'utf8'), 'legacy timer');
+});
+
+supportedTest('pause acquired between runner lock and refresh prevents refresh and unload', async t => {
+  const f = fixture(t, 'darwin');
+  assert.equal(await f.exec(['install']), 0);
+  assert.equal(await f.exec(['enable']), 0);
+  let refreshed = false;
+  f.options.refresh = async () => { refreshed = true; return 0; };
+  f.options.afterLock = async () => {
+    assert.equal(await f.exec(['disable']), 1, 'running marker must prevent bootout');
+    assert.equal(f.calls.some(call => call[1] === 'bootout'), false);
+  };
+  assert.equal(await f.exec(['run']), 0);
+  assert.equal(refreshed, false, 'pause must be rechecked under the acquired marker');
+  assert.equal(await f.exec(['disable']), 0);
+  assert.equal(f.calls.some(call => call[1] === 'bootout'), true);
+});
+
+supportedTest('active runner is never unloaded and duplicate scheduled run cannot refresh', async t => {
+  const f = fixture(t, 'darwin');
+  await f.exec(['install']); await f.exec(['enable']);
+  let finish;
+  f.options.refresh = () => new Promise(done => { finish = done; });
+  const active = f.exec(['run']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(await f.exec(['run']), 1);
+  assert.equal(await f.exec(['uninstall']), 1);
+  assert.equal(f.calls.some(call => call[1] === 'bootout'), false);
+  finish(0);
+  assert.equal(await active, 0);
+  assert.equal(await f.exec(['uninstall']), 0);
+});
+
+supportedTest('installed runtime roots retained by scheduled runner and refresh exit is propagated', async t => {
+  const f = fixture(t);
+  await f.exec(['install']); await f.exec(['enable']);
+  f.options.refresh = async runtime => {
+    assert.deepEqual(runtime, f.runtime);
+    assert.equal(existsSync(join(f.dir, 'running/pid')), true);
+    return 1;
+  };
+  assert.equal(await f.exec(['run']), 1);
+  assert.equal(existsSync(join(f.dir, 'running')), false);
+});
+
+supportedTest('symlinked units and invalid ownership state fail closed', async t => {
+  const f = fixture(t);
+  mkdirSync(f.unitDir, { recursive: true });
+  const outside = join(f.home, 'foreign');
+  writeFileSync(outside, 'foreign');
+  symlinkSync(outside, join(f.unitDir, 'pi-accounts-maintenance.service'));
+  assert.equal(await f.exec(['install']), 1);
+  assert.equal(readFileSync(outside, 'utf8'), 'foreign');
+  rmSync(join(f.unitDir, 'pi-accounts-maintenance.service'));
+  await f.exec(['install']);
+  const state = JSON.parse(readFileSync(join(f.dir, 'state.json'), 'utf8'));
+  state.files['foreign.service'] = ['600:' + 'a'.repeat(64)];
+  writeFileSync(join(f.dir, 'state.json'), JSON.stringify(state));
+  assert.equal(await f.exec(['uninstall']), 1);
+  assert.deepEqual(f.calls, []);
+});
+
+supportedTest('enable failure re-pauses and stale runner markers require explicit inspection', async t => {
+  const f = fixture(t);
+  await f.exec(['install']);
+  f.options.run = () => ({ code: 1, stdout: '', stderr: 'synthetic private error, never print' });
+  assert.equal(await f.exec(['enable']), 1);
+  assert.equal(existsSync(join(f.dir, 'paused')), true);
+  assert.equal(f.errors.some(message => message.includes('synthetic private error')), false);
+  mkdirSync(join(f.dir, 'running'));
+  writeFileSync(join(f.dir, 'running/pid'), '999999');
+  assert.equal(await f.exec(['install']), 1);
+  assert.equal(existsSync(join(f.dir, 'running/pid')), true);
+});

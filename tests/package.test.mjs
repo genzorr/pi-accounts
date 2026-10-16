@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+test('native npm pack/global install/update/uninstall is allowlisted and preserves private agent data', { skip: process.platform === 'win32' }, t => {
+  const scratch = mkdtempSync(join(tmpdir(), 'pi-accounts-npm-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const prefix = join(scratch, 'prefix with spaces');
+  const home = join(scratch, 'home');
+  mkdirSync(join(home, '.pi/agent/accounts'), { recursive: true });
+  const pool = join(home, '.pi/agent/accounts/pool.json');
+  writeFileSync(pool, '{"synthetic":"preserved"}');
+  const env = { ...process.env, HOME: home, npm_config_cache: join(scratch, 'cache'), npm_config_update_notifier: 'false' };
+  const npm = (args, cwd = root) => {
+    const result = spawnSync('npm', args, { cwd, env, encoding: 'utf8', timeout: 60000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const pack = JSON.parse(npm(['pack', '--json', '--ignore-scripts', '--pack-destination', scratch]))[0];
+  assert.deepEqual(pack.files.map(file => file.path).sort(), ['package.json', 'README.md', 'LICENSE', 'NOTICE.md', 'src/accounts.mjs', 'src/cli.mjs', 'src/pi-sdk.mjs', 'src/maintenance.mjs', 'docs/accounts.md'].sort());
+  assert.equal(pack.files.some(file => file.path === 'NOTICE.md'), true);
+  assert.equal(pack.files.some(file => file.path === 'src/maintenance.mjs'), true);
+  const tarball = resolve(scratch, pack.filename);
+  const install = ['install', '--global', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund', '--offline', tarball];
+  npm(install); npm(install);
+  const bin = join(prefix, 'bin/pi-accounts');
+  const help = spawnSync(bin, ['--help'], { env, encoding: 'utf8' });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /maintenance/);
+  const maintenance = spawnSync(bin, ['maintenance', '--help'], { env, encoding: 'utf8' });
+  assert.equal(maintenance.status, 0, maintenance.stderr);
+  assert.match(maintenance.stdout, /install/);
+  assert.equal(readFileSync(pool, 'utf8'), '{"synthetic":"preserved"}');
+  npm(['uninstall', '--global', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund', 'pi-accounts']);
+  assert.equal(existsSync(bin), false);
+  assert.equal(readFileSync(pool, 'utf8'), '{"synthetic":"preserved"}');
+});
