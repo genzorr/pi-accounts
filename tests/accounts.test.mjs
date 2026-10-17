@@ -33,6 +33,66 @@ test('selection preserves unrelated providers; refresh never rotates selection; 
   assert.equal((await stat(join(home, 'accounts'))).mode & 0o777, 0o700);
 });
 
+test('forced refresh renews only the selected account despite a future expiry and uses native credentials', async () => {
+  const calls = [];
+  const { accounts } = await fixture({ oauth: { refresh: async current => {
+    calls.push(current);
+    return { ...current, access: 'synthetic-renewed-access', refresh: 'synthetic-renewed-refresh', expires: Date.now() + 8 * 3600000 };
+  } } });
+  const future = Date.now() + 9 * 86400000;
+  await accounts.add('a', credential('id-a', future));
+  await accounts.add('b', credential('id-b', future));
+  await accounts.select('a');
+  const native = AuthStorage.create(accounts.authPath);
+  await native.modify(PROVIDER, current => ({ ...current, refresh: 'synthetic-native-latest' }));
+  const untouched = (await json(accounts.poolPath)).accounts[1];
+  assert.deepEqual((await accounts.refresh()).map(row => row.status), ['current', 'current']);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await accounts.refresh(undefined, { force: true }), [{ label: 'a', status: 'refreshed' }]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].refresh, 'synthetic-native-latest');
+  const pool = await json(accounts.poolPath);
+  assert.equal(pool.selected, 'a');
+  assert.deepEqual(pool.accounts[1], untouched);
+  assert.deepEqual(pool.accounts[0].credential, (await json(accounts.authPath))[PROVIDER]);
+  assert.equal(pool.accounts[0].credential.access, 'synthetic-renewed-access');
+});
+
+test('targeted forced refresh preserves the active account and refuses unresolved targets', async () => {
+  let calls = 0;
+  const { accounts } = await fixture({ oauth: { refresh: async current => {
+    calls++;
+    return { ...current, refresh: 'synthetic-targeted-refresh', expires: Date.now() + 8 * 3600000 };
+  } } });
+  await assert.rejects(accounts.refresh(undefined, { force: true }), /Select an account|selected account/);
+  await assert.rejects(accounts.refresh('missing', { force: true }), /Unknown account/);
+  assert.equal(calls, 0);
+  await accounts.select('a');
+  const before = await readFile(accounts.authPath, 'utf8');
+  assert.deepEqual(await accounts.refresh('b', { force: true }), [{ label: 'b', status: 'refreshed' }]);
+  assert.equal(calls, 1);
+  assert.equal(await readFile(accounts.authPath, 'utf8'), before);
+  const pool = await json(accounts.poolPath);
+  assert.equal(pool.selected, 'a');
+  assert.equal(pool.accounts[1].credential.refresh, 'synthetic-targeted-refresh');
+});
+
+test('forced refresh failures preserve credentials and redact provider responses', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  const native = await readFile(accounts.authPath, 'utf8');
+  const pool = await readFile(accounts.poolPath, 'utf8');
+  for (const refresh of [async () => { throw new Error('synthetic-private-response'); }, async current => ({ ...current, accountId: 'different-identity' })]) {
+    accounts.oauth.refresh = refresh;
+    const result = await accounts.refresh(undefined, { force: true });
+    assert.equal(result.length, 1);
+    assert.match(result[0].status, /^failed/);
+    assert.equal(JSON.stringify(result).includes('synthetic-private-response'), false);
+    assert.equal(await readFile(accounts.authPath, 'utf8'), native);
+    assert.equal(await readFile(accounts.poolPath, 'utf8'), pool);
+  }
+});
+
 test('revocation leaves selected identity and healthy accounts intact; login repairs saved account', async () => {
   const { accounts } = await fixture({ oauth: { refresh: async c => {
     if (c.accountId === 'id-a') throw new Error('secret response must stay private');
@@ -137,6 +197,12 @@ test('usage projects only quota fields and never prints arbitrary server values'
   });
   assert.equal(result.primary.usedPercent, 42);
   assert.equal(JSON.stringify(result).includes('never-print'), false);
+});
+
+test('usage rejection recommends forced renewal without reading private error bodies', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  await assert.rejects(accounts.usage(undefined, async () => ({ ok: false, status: 401, json: () => { throw new Error('private response must not be read'); } })), /HTTP 401.*refresh LABEL --force/);
 });
 
 test('refresh uses the inclusive 75-minute threshold and stops after persistence failure', async () => {

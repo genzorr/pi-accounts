@@ -45,7 +45,7 @@ pi-accounts maintenance uninstall
 After successful uninstall, replace the package in the resolved prefix. If maintenance was absent, skip its commands and start here:
 
 ```bash
-npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.1/pi-accounts-0.2.1.tgz
+npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.2/pi-accounts-0.2.2.tgz
 ```
 
 For previously installed maintenance, restore its retained runtime without discovering from the current shell:
@@ -83,7 +83,7 @@ Selection does not interrupt credentials already used by an active request. Swit
 
 ## Failure and recovery
 
-For a revoked saved login with valid native JSON, `pi-accounts login LABEL` repairs that same account identity. Local expiry health does not detect revocation; optional email is not an identity key.
+Local expiry does not prove server acceptance. If Pi reports an expired token while `status` says current, run `pi-accounts refresh --force`, then `pi-accounts usage`. Force refresh targets only the selected account unless a label is supplied; ordinary refresh and hourly maintenance keep the 75-minute threshold. A successful refresh means credentials were renewed and saved, not that every API request will succeed. If renewal fails or the server still rejects the credential, `pi-accounts login LABEL` repairs that same saved identity. Optional email is not an identity key.
 
 Private `auth.json.recovery-*` or `accounts/pool.json.recovery-*` files may contain the only rotated refresh token and block further account operations. Disable maintenance and wait for refreshes and native writers to stop before recovery. Never print, attach or commit credential files. Privately compare complete JSON, identity, expiry and pending selection against the destination; only a verified current recovery file may replace its matching destination, with mode 0600. Never replay an older file over newer native auth. Preserve ambiguous material securely; if the current token cannot be established, a fresh Pi-owned login may be necessary.
 

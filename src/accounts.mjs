@@ -168,11 +168,15 @@ export class Accounts {
     });
   }
 
-  async refresh() {
+  async refresh(label, { force = false } = {}) {
     return this.locked(async (pool, auth) => {
+      const target = label ?? (force ? pool.selected : undefined);
+      if (force && !target) throw new AccountError('Select an account or provide a label before forcing refresh');
+      const accounts = target === undefined ? pool.accounts : pool.accounts.filter(account => account.label === target);
+      if (target !== undefined && !accounts.length) throw new AccountError('Unknown account label; run pi-accounts list');
       const results = [];
-      for (const account of pool.accounts) {
-        if (account.credential.expires > this.now() + REFRESH_BEFORE_MS) { results.push({ label: account.label, status: 'current' }); continue; }
+      for (const account of accounts) {
+        if (!force && account.credential.expires > this.now() + REFRESH_BEFORE_MS) { results.push({ label: account.label, status: 'current' }); continue; }
         let credential;
         try {
           credential = await this.oauth.refresh(account.credential, AbortSignal.timeout(15000));
@@ -200,7 +204,7 @@ export class Accounts {
       const account = pool.accounts.find(a => a.label === (label || pool.selected));
       if (!account) throw new AccountError('Select an account or provide its label');
       const response = await fetchUsage('https://chatgpt.com/backend-api/wham/usage', { headers: { Authorization: `Bearer ${account.credential.access}`, 'ChatGPT-Account-Id': account.credential.accountId }, signal: AbortSignal.timeout(15000) });
-      if (!response.ok) throw new AccountError(`Usage unavailable (HTTP ${response.status}); run refresh or login again`);
+      if (!response.ok) throw new AccountError(response.status === 401 ? 'Usage unavailable (HTTP 401); run pi-accounts refresh LABEL --force for this account, then retry' : `Usage unavailable (HTTP ${response.status}); run refresh or login again`);
       const data = await response.json();
       const number = value => Number.isFinite(value) ? value : undefined;
       const bool = value => typeof value === 'boolean' ? value : undefined;
