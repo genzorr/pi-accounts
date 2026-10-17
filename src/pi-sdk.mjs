@@ -5,6 +5,10 @@ import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { AccountError } from './accounts.mjs';
 
+// Bound combinations preserve native refresh locking and persistence after caller cancellation.
+const REVIEWED_PI_AI_VERSIONS = { '1.1.0': ['1.1.0', '1.2.0', '1.3.0'], '1.2.0': ['1.2.0', '1.3.0'], '1.3.0': ['1.3.0'] };
+const SUPPORTED_PI_VERSIONS = Object.keys(REVIEWED_PI_AI_VERSIONS);
+
 export function assertSupportedNode(version = process.versions.node) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
   if (!match || Number(match[1]) < 22 || (Number(match[1]) === 22 && Number(match[2]) < 19)) {
@@ -69,12 +73,12 @@ async function packageFromPath() {
       if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
     }
   }
-  if (!executable) throw new AccountError('Pi command not found on PATH; install Pi 1.3.0 or set PI_PACKAGE_DIR to its package directory');
+  if (!executable) throw new AccountError('Pi command not found on PATH; install a supported Pi release or set PI_PACKAGE_DIR to its package directory');
   const candidates = [dirname(command)];
   if (basename(executable) === 'pi' && basename(dirname(executable)) === 'bin') candidates.push(join(dirname(dirname(executable)), 'install'));
   for (const root of candidates) if (await managedMarker(root)) return managedPackage(root);
   const root = await packageAncestor(executable);
-  if (!root) throw new AccountError('Pi command is not a supported official managed installation or npm package; repair Pi or set PI_PACKAGE_DIR to its Pi 1.3.0 package directory');
+  if (!root) throw new AccountError('Pi command is not a supported official managed installation or npm package; repair Pi or set PI_PACKAGE_DIR to its supported Pi package directory');
   return { root };
 }
 
@@ -95,24 +99,34 @@ export async function loadPi(options = {}) {
   else location = process.env.PI_PACKAGE_DIR ? { root: resolve(process.env.PI_PACKAGE_DIR) } : await packageFromPath();
   const { root, managedInstallRoot } = location;
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-  if (pkg.name !== '@earendil-works/pi-coding-agent' || pkg.version !== '1.3.0') {
+  if (pkg.name !== '@earendil-works/pi-coding-agent' || !SUPPORTED_PI_VERSIONS.includes(pkg.version)) {
     const version = typeof pkg.version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(pkg.version) ? pkg.version : 'an unsupported package';
-    throw new AccountError(`This account tool requires reviewed Pi 1.3.0; found ${version}. Revalidate refresh locking before upgrading`);
+    throw new AccountError(`This account tool supports reviewed Pi ${SUPPORTED_PI_VERSIONS.join(', ')}; found ${version}. Revalidate refresh locking before using another release`);
   }
   const load = (file) => import(pathToFileURL(join(root, file)).href);
   let aiRoot;
+  let aiVersion;
   for (const directory of createRequire(join(root, 'package.json')).resolve.paths('@earendil-works/pi-ai') || []) {
     const candidate = join(directory, '@earendil-works/pi-ai');
     let dependency;
     try { dependency = JSON.parse(await readFile(join(candidate, 'package.json'), 'utf8')); }
     catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue; throw error; }
-    if (dependency.name !== '@earendil-works/pi-ai' || dependency.version !== '1.3.0') throw new AccountError('This account tool requires Pi with its reviewed pi-ai 1.3.0 dependency');
+    if (dependency.name !== '@earendil-works/pi-ai' || !REVIEWED_PI_AI_VERSIONS[pkg.version].includes(dependency.version)) throw new AccountError('This account tool requires a reviewed Pi/pi-ai release combination');
     aiRoot = candidate;
+    aiVersion = dependency.version;
     break;
   }
-  if (!aiRoot) throw new AccountError('Pi OAuth dependency not found; repair the Pi 1.3.0 installation');
-  const { FileAuthStorageBackend, AuthStorage } = await load('dist/core/auth-storage.js');
-  const { resolvePath } = await load('dist/utils/paths.js');
-  const { openaiCodexOAuth } = await import(pathToFileURL(join(aiRoot, 'dist/auth/oauth/openai-codex.js')).href);
-  return { FileAuthStorageBackend, AuthStorage, oauth: openaiCodexOAuth, resolvePath, root, aiRoot, ...(managedInstallRoot ? { managedInstallRoot } : {}) };
+  if (!aiRoot) throw new AccountError('Pi OAuth dependency not found; repair the supported Pi installation');
+  let FileAuthStorageBackend, AuthStorage, resolvePath, openaiCodexOAuth, refreshStoredOAuthCredential;
+  try {
+    ({ FileAuthStorageBackend, AuthStorage } = await load('dist/core/auth-storage.js'));
+    ({ resolvePath } = await load('dist/utils/paths.js'));
+    ({ openaiCodexOAuth } = await import(pathToFileURL(join(aiRoot, 'dist/auth/oauth/openai-codex.js')).href));
+    ({ refreshStoredOAuthCredential } = await import(pathToFileURL(join(aiRoot, 'dist/auth/resolve.js')).href));
+  } catch { throw new AccountError('Pi native auth modules are unavailable; repair the supported Pi installation before account operations'); }
+  const capabilities = [FileAuthStorageBackend?.prototype?.withLock, FileAuthStorageBackend?.prototype?.withLockAsync, AuthStorage?.create, AuthStorage?.prototype?.read, AuthStorage?.prototype?.modify, resolvePath, openaiCodexOAuth?.login, openaiCodexOAuth?.refresh, refreshStoredOAuthCredential];
+  if (!capabilities.every(value => typeof value === 'function')) {
+    throw new AccountError('Pi native auth APIs are incompatible; lock, storage and OAuth capabilities must be present before account operations');
+  }
+  return { FileAuthStorageBackend, AuthStorage, oauth: openaiCodexOAuth, resolvePath, refreshStoredOAuthCredential, version: pkg.version, aiVersion, root, aiRoot, ...(managedInstallRoot ? { managedInstallRoot } : {}) };
 }

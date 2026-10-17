@@ -69,6 +69,7 @@ export class Accounts {
     await mkdir(join(this.home, 'accounts'), { recursive: true, mode: 0o700 });
     const poolBackend = new this.Backend(this.poolPath);
     const authBackend = new this.Backend(this.authPath);
+    // Pool-before-native lock order lets Pi/subagents share auth.json without acquiring the pool lock.
     return poolBackend.withLockAsync(async (poolText) => ({ result: await authBackend.withLockAsync(async (authText) => {
       for (const path of [this.poolPath, this.authPath]) {
         const names = await readdir(dirname(path));
@@ -98,6 +99,7 @@ export class Accounts {
         delete pool.pending;
         await this.write(this.poolPath, pool);
       }
+      // Native auth owns the selected credential; pool snapshots must not replay an older refresh token.
       if (pool.selected) {
         const selected = pool.accounts.find(a => a.label === pool.selected);
         if (!selected || !validCredential(auth[PROVIDER]) || selected.credential.accountId !== auth[PROVIDER].accountId) throw new AccountError('Native Pi login differs from selected account; restore the selected login or resolve the pool before retrying');

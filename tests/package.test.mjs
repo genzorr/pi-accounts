@@ -22,7 +22,7 @@ test('native npm pack/global install/update/uninstall is allowlisted and preserv
     return result.stdout;
   };
   const pack = JSON.parse(npm(['pack', '--json', '--ignore-scripts', '--pack-destination', scratch]))[0];
-  assert.deepEqual(pack.files.map(file => file.path).sort(), ['package.json', 'README.md', 'LICENSE', 'NOTICE.md', 'src/accounts.mjs', 'src/cli.mjs', 'src/pi-sdk.mjs', 'src/maintenance.mjs', 'docs/accounts.md'].sort());
+  assert.deepEqual(pack.files.map(file => file.path).sort(), ['package.json', 'README.md', 'LICENSE', 'NOTICE.md', 'src/accounts.mjs', 'src/cli.mjs', 'src/pi-sdk.mjs', 'src/maintenance.mjs', 'src/update.mjs', 'docs/accounts.md'].sort());
   assert.equal(pack.files.some(file => file.path === 'NOTICE.md'), true);
   assert.equal(pack.files.some(file => file.path === 'src/maintenance.mjs'), true);
   const tarball = resolve(scratch, pack.filename);
@@ -35,6 +35,9 @@ test('native npm pack/global install/update/uninstall is allowlisted and preserv
   const maintenance = spawnSync(bin, ['maintenance', '--help'], { env, encoding: 'utf8' });
   assert.equal(maintenance.status, 0, maintenance.stderr);
   assert.match(maintenance.stdout, /install/);
+  const update = spawnSync(bin, ['update', '--help'], { env: { ...env, PI_PACKAGE_DIR: join(scratch, 'missing-sdk') }, encoding: 'utf8' });
+  assert.equal(update.status, 0, update.stderr);
+  assert.match(update.stdout, /GitHub/);
   assert.equal(readFileSync(pool, 'utf8'), '{"synthetic":"preserved"}');
   npm(['uninstall', '--global', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund', 'pi-accounts']);
   assert.equal(existsSync(bin), false);
