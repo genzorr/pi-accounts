@@ -45,7 +45,7 @@ pi-accounts maintenance uninstall
 After successful uninstall, replace the package in the resolved prefix. If maintenance was absent, skip its commands and start here:
 
 ```bash
-npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.1/pi-accounts-0.2.1.tgz
+npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.3/pi-accounts-0.2.3.tgz
 ```
 
 For previously installed maintenance, restore its retained runtime without discovering from the current shell:
@@ -79,11 +79,11 @@ Removal preserves credentials, selection, logs and the private ownership/pause r
 
 ## Concurrency and session behavior
 
-Selection does not interrupt credentials already used by an active request. Switch at idle, then restart/resume Pi or T3 for a clean boundary. Use this CLI for managed account changes; avoid Pi's `/login` and `/logout` against the same pool. Existing unmanaged native logins are refused and require a separate operator-owned migration/removal decision; do not copy Codex/CMA refresh credentials into the pool.
+`select LABEL` force-refreshes the target before activation, including reselecting the active account, and requires connectivity. A failed renewal leaves selection unchanged. Selection does not interrupt credentials already used by an active request. Switch at idle, then restart/resume Pi or T3 for a clean boundary. Use this CLI for managed account changes; avoid Pi's `/login` and `/logout` against the same pool. Existing unmanaged native logins are refused and require a separate operator-owned migration/removal decision; do not copy Codex/CMA refresh credentials into the pool.
 
 ## Failure and recovery
 
-For a revoked saved login with valid native JSON, `pi-accounts login LABEL` repairs that same account identity. Local expiry health does not detect revocation; optional email is not an identity key.
+Local expiry does not prove server acceptance. If Pi reports an expired token while `status` says current, run `pi-accounts refresh --force`, then `pi-accounts usage`. Force refresh targets only the selected account unless a label is supplied; ordinary refresh and hourly maintenance keep the 75-minute threshold. A successful refresh means credentials were renewed and saved, not that every API request will succeed. If renewal fails or the server still rejects the credential, `pi-accounts login LABEL` repairs that same saved identity. Optional email is not an identity key.
 
 Private `auth.json.recovery-*` or `accounts/pool.json.recovery-*` files may contain the only rotated refresh token and block further account operations. Disable maintenance and wait for refreshes and native writers to stop before recovery. Never print, attach or commit credential files. Privately compare complete JSON, identity, expiry and pending selection against the destination; only a verified current recovery file may replace its matching destination, with mode 0600. Never replay an older file over newer native auth. Preserve ambiguous material securely; if the current token cannot be established, a fresh Pi-owned login may be necessary.
 

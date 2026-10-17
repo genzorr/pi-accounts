@@ -15,7 +15,7 @@ For **0.1.x**, follow the [maintenance-safe upgrade procedure](docs/accounts.md#
 For a **fresh installation**:
 
 ```bash
-npm install --global --ignore-scripts --engine-strict 'https://github.com/genzorr/pi-accounts/releases/download/v0.2.1/pi-accounts-0.2.1.tgz'
+npm install --global --ignore-scripts --engine-strict 'https://github.com/genzorr/pi-accounts/releases/download/v0.2.3/pi-accounts-0.2.3.tgz'
 pi-accounts --help
 ```
 
@@ -29,9 +29,9 @@ pi-accounts usage
 pi-accounts rename personal primary
 ```
 
-Browser login is the default and supports a pasted callback remotely; `login work --device` optionally uses device-code login. Login saves without selecting. Use short labels such as `personal` or `work`; email is optional display metadata. Select at idle, then restart/resume Pi or T3 for a clean account boundary.
+Browser login is the default and supports a pasted callback remotely; `login work --device` optionally uses device-code login. Login saves without selecting. `select` force-refreshes before activating, including when reselecting the active account; renewal failure keeps the current selection. Use short labels such as `personal` or `work`; email is optional display metadata. Select at idle, then restart/resume Pi or T3 for a clean account boundary.
 
-`list` and `status` check local expiry; quota from `usage` is best effort. Run `refresh` to renew accounts due within 75 minutes. Add `--json` to list, status, usage or refresh for scripts.
+`list` and `status` check local expiry; quota from `usage` is best effort. Run `refresh` to renew accounts due within 75 minutes. If Pi rejects a token despite a future expiry, run `pi-accounts refresh --force` to renew the selected account, then `pi-accounts usage` to check server acceptance. `refresh LABEL --force` targets another saved account without switching. Add `--json` to list, status, usage or refresh for scripts.
 
 ## Optional hourly maintenance
 

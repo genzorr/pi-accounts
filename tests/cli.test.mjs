@@ -33,7 +33,7 @@ async function fixture(t) {
 for (const [name, args, success] of [
   ['invalid login label', ['login', 'person@example.com'], false],
   ['refresh help', ['refresh', '--help'], true],
-  ['refresh extra argument', ['refresh', 'unexpected'], false],
+  ['refresh extra argument', ['refresh', 'unexpected', 'extra'], false],
 ]) {
   test(`audit regression: ${name} has no SDK, storage or provider effects`, async t => {
     const f = await fixture(t);
@@ -46,7 +46,7 @@ for (const [name, args, success] of [
 
 test('help and invalid syntax never initialize the SDK, storage or OAuth', async t => {
   const f = await fixture(t);
-  const help = [[], ['help'], ['--help'], ['-h'], ['help', 'refresh'], ['login', 'personal', '--device', '--help'], ['refresh', '--json', '--help'], ['rename', 'personal', 'work', '--help'], ...['login', 'add', 'select', 'rename', 'list', 'status', 'usage', 'refresh'].flatMap(command => [[command, '--help'], [command, '-h']])];
+  const help = [[], ['help'], ['--help'], ['-h'], ['help', 'refresh'], ['login', 'personal', '--device', '--help'], ['refresh', '--json', '--help'], ['refresh', '--force', '--help'], ['rename', 'personal', 'work', '--help'], ...['login', 'add', 'select', 'rename', 'list', 'status', 'usage', 'refresh'].flatMap(command => [[command, '--help'], [command, '-h']])];
   for (const args of help) {
     const result = f.run(args);
     assert.equal(result.status, 0, `${args}: ${result.stderr}`);
@@ -55,9 +55,9 @@ test('help and invalid syntax never initialize the SDK, storage or OAuth', async
   }
   const invalid = [
     ['login', 'person@example.com'], ['login', 'person@example.com', '--help'], ['add', 'person@example.com'], ['login'], ['select'], ['select', 'person@example.com'], ['usage', 'person@example.com'],
-    ['refresh', 'unexpected'], ['status', 'unexpected'], ['list', 'unexpected'], ['usage', 'a', 'b'], ['login', 'a', 'b'], ['select', 'a', 'b'],
+    ['refresh', 'a', 'b'], ['status', 'unexpected'], ['list', 'unexpected'], ['usage', 'a', 'b'], ['login', 'a', 'b'], ['select', 'a', 'b'],
     ['login', 'a', '--unknown'], ['login', 'a', '--device', '--device'], ['refresh', '--device'], ['status', '--device'], ['select', 'a', '--json'], ['login', 'a', '--json'],
-    ['refresh', '--json', '--json'], ['help', 'unknown'], ['unknown'], ['--help', 'unexpected'], ['refresh', 'unexpected', '--help'], ['login', 'a'.repeat(65)], ['login', '-a'], ['rename'], ['rename', 'a'], ['rename', 'a', 'b', 'c'], ['rename', 'a', 'email@example.test'], ['rename', 'email@example.test', 'a'], ['rename', 'a', 'b', '--json'], ['rename', 'a', 'b', '--device'],
+    ['refresh', '--json', '--json'], ['refresh', '--force', '--force'], ['status', '--force'], ['refresh', 'person@example.test', '--force'], ['help', 'unknown'], ['unknown'], ['--help', 'unexpected'], ['refresh', 'a', 'b', '--help'], ['login', 'a'.repeat(65)], ['login', '-a'], ['rename'], ['rename', 'a'], ['rename', 'a', 'b', 'c'], ['rename', 'a', 'email@example.test'], ['rename', 'email@example.test', 'a'], ['rename', 'a', 'b', '--json'], ['rename', 'a', 'b', '--device'],
   ];
   for (const args of invalid) {
     const result = f.run(args);
@@ -106,6 +106,49 @@ test('short-label login keeps browser default, device stays optional, and human 
   result = f.run(['refresh', '--json']);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).map(row => row.status), ['current', 'current']);
+});
+
+test('forced refresh CLI targets the selected or named account without changing selection', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['login', 'personal']).status, 0);
+  assert.equal(f.run(['login', 'work'], { PI_SYNTHETIC_ID: 'work-id' }).status, 0);
+  assert.equal(f.run(['refresh', '--force']).status, 1);
+  assert.equal(f.run(['select', 'personal']).status, 0);
+  await writeFile(f.trace, '');
+  let result = f.run(['refresh', '--force', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [{ label: 'personal', status: 'refreshed' }]);
+  assert.equal((await f.calls()).match(/provider:refresh/g)?.length, 1);
+  const auth = await readFile(join(f.home, 'auth.json'), 'utf8');
+  result = f.run(['refresh', 'work', '--force', '--json'], { PI_SYNTHETIC_ID: 'work-id' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [{ label: 'work', status: 'refreshed' }]);
+  assert.equal(await readFile(join(f.home, 'auth.json'), 'utf8'), auth);
+  assert.equal(JSON.parse(f.run(['status', '--json']).stdout).find(row => row.selected).label, 'personal');
+  const before = await f.calls();
+  result = f.run(['refresh', 'missing', '--force']);
+  assert.equal(result.status, 1);
+  assert.equal((await f.calls()).slice(before.length).includes('provider:refresh'), false);
+});
+
+test('CLI select renews before activation and reselect, but refuses a mismatched renewal', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['login', 'personal']).status, 0);
+  assert.equal(f.run(['login', 'work'], { PI_SYNTHETIC_ID: 'work-id' }).status, 0);
+  await writeFile(f.trace, '');
+  for (const access of ['synthetic-selected-new', 'synthetic-reselected-new']) {
+    const result = f.run(['select', 'personal'], { PI_SYNTHETIC_ACCESS: access });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Refreshed and selected/);
+    assert.equal(JSON.parse(await readFile(join(f.home, 'auth.json'), 'utf8'))['openai-codex'].access, access);
+  }
+  assert.equal((await f.calls()).match(/provider:refresh/g)?.length, 2);
+  const before = await readFile(join(f.home, 'auth.json'), 'utf8');
+  const failed = f.run(['select', 'work']);
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /refresh failed/i);
+  assert.equal(await readFile(join(f.home, 'auth.json'), 'utf8'), before);
+  assert.equal(JSON.parse(f.run(['status', '--json']).stdout).find(row => row.selected).label, 'personal');
 });
 
 test('CLI rename preserves active credentials and performs no provider operation', async t => {
@@ -318,7 +361,7 @@ test('maintenance dispatch is lazy and preserves arguments and the module exit c
   const command = await installedCli(f.root);
   await writeFile(join(command, '..', 'maintenance.mjs'), `import { appendFileSync } from 'node:fs';\nconst mark = text => appendFileSync(process.env.PI_AUDIT_TRACE, text + '\\n');\nmark('maintenance:loaded');\nexport async function runMaintenance(argv) { mark('maintenance:args:' + JSON.stringify(argv)); if (argv.includes('--help')) { console.log('synthetic maintenance help'); return 0; } return 7; }\n`);
   const run = args => spawnSync(process.execPath, [command, ...args], { env: f.env, encoding: 'utf8' });
-  for (const args of [[], ['--help'], ['help', 'maintenance'], ['login', 'email@example.test'], ['refresh', 'unexpected']]) {
+  for (const args of [[], ['--help'], ['help', 'maintenance'], ['login', 'email@example.test'], ['refresh', 'unexpected', 'extra']]) {
     const result = run(args);
     assert.equal(result.status, ['login', 'refresh'].includes(args[0]) ? 1 : 0, result.stderr);
   }

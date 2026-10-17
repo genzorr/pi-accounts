@@ -8,17 +8,18 @@ import { Accounts, AccountError, validateLabel, displayText } from './accounts.m
 const commands = ['login', 'add', 'list', 'status', 'select', 'rename', 'usage', 'refresh', 'maintenance', 'update'];
 const help = `pi-accounts login|add LABEL [--device]   Save a Pi-owned login; browser flow is the default
 pi-accounts list|status [--json]         Show saved accounts and local expiry health
-pi-accounts select LABEL                Choose the active account manually
+pi-accounts select LABEL                Force-refresh and choose the active account
 pi-accounts rename OLD NEW              Rename a saved label without changing credentials
 pi-accounts usage [LABEL] [--json]       Check quota for an account (default: active)
-pi-accounts refresh [--json]             Refresh accounts due within 75 minutes
+pi-accounts refresh [LABEL] [--force] [--json]  Refresh due accounts; --force defaults to active only
 pi-accounts maintenance ...             Install, inspect or remove scheduled maintenance
 pi-accounts update                      Update this global installation from GitHub releases
 pi-accounts COMMAND --help              Show help without accessing the SDK or stores
 
 Use a short label such as personal or work, not an email address.
 Browser login works remotely with a pasted callback; --device optionally uses device-code login.
-Use --json for scripts and maintenance. Local health does not verify revocation.`;
+Use --json for scripts and maintenance. Local health does not verify server acceptance.
+If Pi rejects a locally current token, use refresh --force; it does not switch accounts.`;
 
 function parse(args) {
   const [command = 'help', ...rest] = args;
@@ -33,16 +34,16 @@ function parse(args) {
   for (const argument of rest) {
     if (!argument.startsWith('-')) { labels.push(argument); continue; }
     const option = argument === '-h' ? '--help' : argument;
-    const allowed = option === '--help' || (option === '--device' && ['login', 'add'].includes(command)) || (option === '--json' && ['list', 'status', 'usage', 'refresh'].includes(command));
+    const allowed = option === '--help' || (option === '--device' && ['login', 'add'].includes(command)) || (option === '--force' && command === 'refresh') || (option === '--json' && ['list', 'status', 'usage', 'refresh'].includes(command));
     if (!allowed || options.has(option)) throw new AccountError('Invalid or repeated option; run pi-accounts help');
     options.add(option);
   }
   const requiredLabels = command === 'rename' ? 2 : ['login', 'add', 'select'].includes(command) ? 1 : 0;
-  const maximumLabels = command === 'usage' ? 1 : requiredLabels;
+  const maximumLabels = ['usage', 'refresh'].includes(command) ? 1 : requiredLabels;
   if (labels.length > maximumLabels) throw new AccountError('Invalid extra argument; run pi-accounts help');
   for (const label of labels) validateLabel(label);
   if (!options.has('--help') && labels.length < requiredLabels) throw new AccountError(command === 'rename' ? 'Use pi-accounts rename OLD NEW with two short labels' : 'Use a short account label; for example pi-accounts login personal');
-  return { command, label: labels[0], newLabel: labels[1], help: options.has('--help'), device: options.has('--device'), json: options.has('--json') };
+  return { command, label: labels[0], newLabel: labels[1], help: options.has('--help'), device: options.has('--device'), force: options.has('--force'), json: options.has('--json') };
 }
 
 function printStatus(rows) {
@@ -95,12 +96,12 @@ async function main() {
     console.log(`Saved ${label}. Run pi-accounts select ${label} to use it.`);
   } else if (command === 'select') {
     await accounts.select(label);
-    console.log(`Selected ${label}. Restart/resume idle Pi or T3 sessions for a clean account boundary.`);
+    console.log(`Refreshed and selected ${label}. Restart/resume idle Pi or T3 sessions for a clean account boundary.`);
   } else if (command === 'rename') {
     const changed = await accounts.rename(label, options.newLabel);
     console.log(changed ? `Renamed ${label} to ${options.newLabel}.` : `Account is already named ${label}.`);
   } else {
-    const result = command === 'refresh' ? await accounts.refresh() : command === 'usage' ? await accounts.usage(label) : await accounts.status();
+    const result = command === 'refresh' ? await accounts.refresh(label, { force: options.force }) : command === 'usage' ? await accounts.usage(label) : await accounts.status();
     if (options.json) console.log(JSON.stringify(result, null, 2));
     else if (command === 'usage') printUsage(result);
     else if (command === 'refresh') {
