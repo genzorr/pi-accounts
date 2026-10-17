@@ -45,7 +45,7 @@ pi-accounts maintenance uninstall
 After successful uninstall, replace the package in the resolved prefix. If maintenance was absent, skip its commands and start here:
 
 ```bash
-npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.2/pi-accounts-0.2.2.tgz
+npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.3/pi-accounts-0.2.3.tgz
 ```
 
 For previously installed maintenance, restore its retained runtime without discovering from the current shell:
@@ -79,7 +79,7 @@ Removal preserves credentials, selection, logs and the private ownership/pause r
 
 ## Concurrency and session behavior
 
-Selection does not interrupt credentials already used by an active request. Switch at idle, then restart/resume Pi or T3 for a clean boundary. Use this CLI for managed account changes; avoid Pi's `/login` and `/logout` against the same pool. Existing unmanaged native logins are refused and require a separate operator-owned migration/removal decision; do not copy Codex/CMA refresh credentials into the pool.
+`select LABEL` force-refreshes the target before activation, including reselecting the active account, and requires connectivity. A failed renewal leaves selection unchanged. Selection does not interrupt credentials already used by an active request. Switch at idle, then restart/resume Pi or T3 for a clean boundary. Use this CLI for managed account changes; avoid Pi's `/login` and `/logout` against the same pool. Existing unmanaged native logins are refused and require a separate operator-owned migration/removal decision; do not copy Codex/CMA refresh credentials into the pool.
 
 ## Failure and recovery
 

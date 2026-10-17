@@ -8,7 +8,7 @@ import { Accounts, AccountError, validateLabel, displayText } from './accounts.m
 const commands = ['login', 'add', 'list', 'status', 'select', 'rename', 'usage', 'refresh', 'maintenance', 'update'];
 const help = `pi-accounts login|add LABEL [--device]   Save a Pi-owned login; browser flow is the default
 pi-accounts list|status [--json]         Show saved accounts and local expiry health
-pi-accounts select LABEL                Choose the active account manually
+pi-accounts select LABEL                Force-refresh and choose the active account
 pi-accounts rename OLD NEW              Rename a saved label without changing credentials
 pi-accounts usage [LABEL] [--json]       Check quota for an account (default: active)
 pi-accounts refresh [LABEL] [--force] [--json]  Refresh due accounts; --force defaults to active only
@@ -96,7 +96,7 @@ async function main() {
     console.log(`Saved ${label}. Run pi-accounts select ${label} to use it.`);
   } else if (command === 'select') {
     await accounts.select(label);
-    console.log(`Selected ${label}. Restart/resume idle Pi or T3 sessions for a clean account boundary.`);
+    console.log(`Refreshed and selected ${label}. Restart/resume idle Pi or T3 sessions for a clean account boundary.`);
   } else if (command === 'rename') {
     const changed = await accounts.rename(label, options.newLabel);
     console.log(changed ? `Renamed ${label} to ${options.newLabel}.` : `Account is already named ${label}.`);

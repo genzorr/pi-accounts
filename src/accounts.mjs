@@ -54,6 +54,18 @@ function parseObject(text) {
   return data;
 }
 
+async function renewCredential(oauth, account) {
+  let credential;
+  try {
+    credential = await oauth.refresh(account.credential, AbortSignal.timeout(15000));
+    if (!validCredential(credential) || credential.accountId !== account.credential.accountId) throw new Error('Invalid refreshed identity');
+  } catch {
+    throw new AccountError('Token refresh failed; check connectivity or log in to this account again');
+  }
+  account.credential = credential;
+  account.email = credentialEmail(credential) || displayEmail(account.email);
+}
+
 export class Accounts {
   constructor({ home, resolvePath, Backend, oauth, write = atomicWrite, now = Date.now }) {
     this.home = resolvePath(home);
@@ -134,7 +146,14 @@ export class Accounts {
     return this.locked(async (pool, auth) => {
       const target = pool.accounts.find(a => a.label === label);
       if (!target) throw new AccountError('Unknown account label; run pi-accounts list');
-      if (pool.selected === label) return;
+      await renewCredential(this.oauth, target);
+      if (pool.selected === label) {
+        // Native auth remains authoritative if the pool commit is interrupted.
+        auth[PROVIDER] = target.credential;
+        await this.write(this.authPath, auth);
+        await this.write(this.poolPath, pool);
+        return;
+      }
       // The durable intent preserves both accounts across a crash between file renames.
       pool.pending = { from: pool.selected, to: label };
       await this.write(this.poolPath, pool);
@@ -177,23 +196,19 @@ export class Accounts {
       const results = [];
       for (const account of accounts) {
         if (!force && account.credential.expires > this.now() + REFRESH_BEFORE_MS) { results.push({ label: account.label, status: 'current' }); continue; }
-        let credential;
         try {
-          credential = await this.oauth.refresh(account.credential, AbortSignal.timeout(15000));
-          if (!validCredential(credential) || credential.accountId !== account.credential.accountId) throw new AccountError('Invalid refreshed identity');
+          await renewCredential(this.oauth, account);
         } catch {
           // Provider errors may include token responses. Never print their messages.
           results.push({ label: account.label, status: 'failed; check connectivity or login again; inspect private recovery files after disk errors' });
           continue;
         }
-        account.credential = credential;
-        account.email = credentialEmail(credential) || displayEmail(account.email);
         if (account.label === pool.selected) {
-          auth[PROVIDER] = credential;
+          auth[PROVIDER] = account.credential;
           await this.write(this.authPath, auth);
         }
         await this.write(this.poolPath, pool);
-        results.push({ label: account.label, status: credential.expires > this.now() + REFRESH_BEFORE_MS ? 'refreshed' : 'expires-too-soon' });
+        results.push({ label: account.label, status: account.credential.expires > this.now() + REFRESH_BEFORE_MS ? 'refreshed' : 'expires-too-soon' });
       }
       return results;
     });

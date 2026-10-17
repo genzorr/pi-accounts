@@ -33,6 +33,61 @@ test('selection preserves unrelated providers; refresh never rotates selection; 
   assert.equal((await stat(join(home, 'accounts'))).mode & 0o777, 0o700);
 });
 
+test('select always renews its target and reselect uses the latest native token', async () => {
+  const calls = [];
+  const { accounts } = await fixture({ oauth: { refresh: async current => {
+    calls.push(current);
+    return { ...current, refresh: `${current.refresh}-renewed`, expires: Date.now() + 8 * 3600000 };
+  } } });
+  await accounts.add('a', credential('id-a', Date.now() + 9 * 86400000));
+  await accounts.add('b', credential('id-b', Date.now() + 9 * 86400000));
+  await accounts.select('a');
+  await accounts.select('b');
+  assert.deepEqual(calls.map(c => c.accountId), ['id-a', 'id-b']);
+  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-refresh-id-b-renewed');
+  await AuthStorage.create(accounts.authPath).modify(PROVIDER, current => ({ ...current, refresh: 'synthetic-native-latest' }));
+  await accounts.select('b');
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].refresh, 'synthetic-native-latest');
+  const pool = await json(accounts.poolPath);
+  assert.equal(pool.selected, 'b');
+  assert.deepEqual(pool.accounts[1].credential, (await json(accounts.authPath))[PROVIDER]);
+  assert.equal(pool.accounts[1].credential.refresh, 'synthetic-native-latest-renewed');
+});
+
+test('failed select renewal keeps selection and credentials unchanged without leaking provider errors', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  const auth = await readFile(accounts.authPath, 'utf8');
+  const pool = await readFile(accounts.poolPath, 'utf8');
+  for (const label of ['a', 'b']) {
+    for (const refresh of [async () => { throw new Error('synthetic-private-response'); }, async current => ({ ...current, accountId: 'wrong-identity' })]) {
+      accounts.oauth.refresh = refresh;
+      await assert.rejects(accounts.select(label), error => /refresh failed/i.test(error.message) && !error.message.includes('synthetic-private-response'));
+      assert.equal(await readFile(accounts.authPath, 'utf8'), auth);
+      assert.equal(await readFile(accounts.poolPath, 'utf8'), pool);
+    }
+  }
+});
+
+test('interrupted reselect preserves rotated native credentials without a same-account pending intent', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  accounts.oauth.refresh = async current => ({ ...current, refresh: 'synthetic-reselected-new', expires: Date.now() + 8 * 3600000 });
+  accounts.write = async (path, data) => {
+    if (path === accounts.poolPath) throw new Error('pool commit interrupted');
+    await atomicWrite(path, data);
+  };
+  await assert.rejects(accounts.select('a'), /pool commit interrupted/);
+  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-reselected-new');
+  assert.equal((await json(accounts.poolPath)).pending, undefined);
+  accounts.write = atomicWrite;
+  assert.equal((await accounts.status()).find(a => a.selected).label, 'a');
+  accounts.oauth.refresh = async current => ({ ...current, expires: Date.now() + 8 * 3600000 });
+  await accounts.select('b');
+  assert.equal((await json(accounts.poolPath)).accounts[0].credential.refresh, 'synthetic-reselected-new');
+});
+
 test('forced refresh renews only the selected account despite a future expiry and uses native credentials', async () => {
   const calls = [];
   const { accounts } = await fixture({ oauth: { refresh: async current => {
@@ -43,6 +98,7 @@ test('forced refresh renews only the selected account despite a future expiry an
   await accounts.add('a', credential('id-a', future));
   await accounts.add('b', credential('id-b', future));
   await accounts.select('a');
+  calls.length = 0;
   const native = AuthStorage.create(accounts.authPath);
   await native.modify(PROVIDER, current => ({ ...current, refresh: 'synthetic-native-latest' }));
   const untouched = (await json(accounts.poolPath)).accounts[1];
@@ -68,6 +124,7 @@ test('targeted forced refresh preserves the active account and refuses unresolve
   await assert.rejects(accounts.refresh('missing', { force: true }), /Unknown account/);
   assert.equal(calls, 0);
   await accounts.select('a');
+  calls = 0;
   const before = await readFile(accounts.authPath, 'utf8');
   assert.deepEqual(await accounts.refresh('b', { force: true }), [{ label: 'b', status: 'refreshed' }]);
   assert.equal(calls, 1);
@@ -94,11 +151,13 @@ test('forced refresh failures preserve credentials and redact provider responses
 });
 
 test('revocation leaves selected identity and healthy accounts intact; login repairs saved account', async () => {
-  const { accounts } = await fixture({ oauth: { refresh: async c => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  await accounts.add('a', credential('id-a'));
+  accounts.oauth.refresh = async c => {
     if (c.accountId === 'id-a') throw new Error('secret response must stay private');
     return { ...c, expires: Date.now() + 8 * 3600000 };
-  } } });
-  await accounts.select('a');
+  };
   const results = await accounts.refresh();
   assert.match(results[0].status, /^failed/);
   assert.equal(results[1].status, 'refreshed');
@@ -272,8 +331,9 @@ test('a second interrupted selection recovery preserves a native-rotated previou
   assert.equal((await json(accounts.authPath))[PROVIDER].accountId, 'id-b');
   accounts.write = atomicWrite;
   assert.equal((await accounts.status())[1].selected, true);
+  assert.equal((await json(accounts.poolPath)).accounts[0].credential.refresh, 'synthetic-a1-rotated');
   await accounts.select('a');
-  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-a1-rotated');
+  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-a1-rotated-new');
 });
 
 test('native supported agent-home spellings use one store for reads, locks and writes', async () => {
@@ -289,7 +349,7 @@ test('native supported agent-home spellings use one store for reads, locks and w
         return super.withLockAsync(fn, options);
       }
     }
-    const same = new Accounts({ home: spelling, resolvePath, Backend: RecordingBackend, oauth: {}, write: async (path, data) => {
+    const same = new Accounts({ home: spelling, resolvePath, Backend: RecordingBackend, oauth: accounts.oauth, write: async (path, data) => {
       writes.push(path);
       return atomicWrite(path, data);
     } });
@@ -351,8 +411,9 @@ test('local health distinguishes expiry from proactive renewal without a provide
 
 test('rename changes selected and nonselected labels without touching native auth or credentials', async () => {
   let providerCalls = 0;
-  const { accounts } = await fixture({ oauth: { refresh: async () => { providerCalls++; throw new Error('must not refresh'); } } });
+  const { accounts } = await fixture();
   await accounts.select('a');
+  accounts.oauth.refresh = async () => { providerCalls++; throw new Error('must not refresh'); };
   const nativeBefore = await readFile(accounts.authPath, 'utf8');
   const credentialsBefore = (await json(accounts.poolPath)).accounts.map(a => a.credential);
   assert.equal(await accounts.rename('a', 'personal'), true);
@@ -384,8 +445,9 @@ test('rename completes pending recovery and checkpoints a native-rotated previou
   await accounts.rename('b', 'work');
   assert.deepEqual((await accounts.status()).map(a => [a.label, a.selected]), [['a', false], ['work', true]]);
   assert.equal((await json(accounts.authPath))[PROVIDER].accountId, 'id-b');
+  assert.equal((await json(accounts.poolPath)).accounts[0].credential.refresh, 'synthetic-rotated-before-rename');
   await accounts.select('a');
-  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-rotated-before-rename');
+  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-rotated-before-rename-new');
 });
 
 test('failed rename persistence preserves the active credentials and releases its locks for retry', async () => {

@@ -131,6 +131,26 @@ test('forced refresh CLI targets the selected or named account without changing 
   assert.equal((await f.calls()).slice(before.length).includes('provider:refresh'), false);
 });
 
+test('CLI select renews before activation and reselect, but refuses a mismatched renewal', async t => {
+  const f = await fixture(t);
+  assert.equal(f.run(['login', 'personal']).status, 0);
+  assert.equal(f.run(['login', 'work'], { PI_SYNTHETIC_ID: 'work-id' }).status, 0);
+  await writeFile(f.trace, '');
+  for (const access of ['synthetic-selected-new', 'synthetic-reselected-new']) {
+    const result = f.run(['select', 'personal'], { PI_SYNTHETIC_ACCESS: access });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Refreshed and selected/);
+    assert.equal(JSON.parse(await readFile(join(f.home, 'auth.json'), 'utf8'))['openai-codex'].access, access);
+  }
+  assert.equal((await f.calls()).match(/provider:refresh/g)?.length, 2);
+  const before = await readFile(join(f.home, 'auth.json'), 'utf8');
+  const failed = f.run(['select', 'work']);
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /refresh failed/i);
+  assert.equal(await readFile(join(f.home, 'auth.json'), 'utf8'), before);
+  assert.equal(JSON.parse(f.run(['status', '--json']).stdout).find(row => row.selected).label, 'personal');
+});
+
 test('CLI rename preserves active credentials and performs no provider operation', async t => {
   const f = await fixture(t);
   assert.equal(f.run(['login', 'personal']).status, 0);
