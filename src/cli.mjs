@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import { loadPi } from './pi-sdk.mjs';
 import { Accounts, AccountError, validateLabel, displayText } from './accounts.mjs';
 
-const commands = ['login', 'add', 'list', 'status', 'select', 'rename', 'usage', 'refresh', 'maintenance'];
+const commands = ['login', 'add', 'list', 'status', 'select', 'rename', 'usage', 'refresh', 'maintenance', 'update'];
 const help = `pi-accounts login|add LABEL [--device]   Save a Pi-owned login; browser flow is the default
 pi-accounts list|status [--json]         Show saved accounts and local expiry health
 pi-accounts select LABEL                Choose the active account manually
@@ -13,6 +13,7 @@ pi-accounts rename OLD NEW              Rename a saved label without changing cr
 pi-accounts usage [LABEL] [--json]       Check quota for an account (default: active)
 pi-accounts refresh [--json]             Refresh accounts due within 75 minutes
 pi-accounts maintenance ...             Install, inspect or remove scheduled maintenance
+pi-accounts update                      Update this global installation from GitHub releases
 pi-accounts COMMAND --help              Show help without accessing the SDK or stores
 
 Use a short label such as personal or work, not an email address.
@@ -63,6 +64,11 @@ function printUsage(result) {
 }
 
 async function main() {
+  if (process.argv[2] === 'update') {
+    const { runUpdate } = await import('./update.mjs');
+    process.exitCode = await runUpdate(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'maintenance') {
     const { runMaintenance } = await import('./maintenance.mjs');
     const code = await runMaintenance(process.argv.slice(3));
@@ -110,6 +116,6 @@ main().catch(error => {
   if (error instanceof AccountError) console.error(error.message);
   else if (['EACCES', 'EPERM', 'ENOSPC', 'EROFS'].includes(error.code)) console.error('Account storage is not writable; check private store permissions and free space. Review private recovery files before retrying.');
   else if (error.code === 'ELOCKED') console.error('Account store is busy; wait for the active login or maintenance operation, then retry.');
-  else console.error('Account operation failed; check Pi 1.3.0 installation, network connectivity, private store permissions and recovery files. Provider responses and credentials were not printed.');
+  else console.error('Account operation failed; check the supported Pi installation, network connectivity, private store permissions and recovery files. Provider responses and credentials were not printed.');
   process.exitCode = 1;
 });

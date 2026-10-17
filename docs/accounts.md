@@ -1,6 +1,6 @@
 # Pi accounts
 
-`pi-accounts` is a standalone Pi-only account CLI. It uses the installed Pi 1.3.0 native auth storage and OpenAI OAuth implementation, keeps the canonical `openai-codex` provider, and leaves model, effort, sessions, settings, Codex and CMA unchanged. Each saved account needs its own Pi-owned login. It refuses an existing unmanaged native Pi credential instead of importing shared refresh tokens. There is no automatic account rotation or inference proxy.
+`pi-accounts` is a standalone Pi-only account CLI. It uses the supported installed Pi native auth storage and OpenAI OAuth implementation, keeps the canonical `openai-codex` provider, and leaves model, effort, sessions, settings, Codex and CMA unchanged. Each saved account needs its own Pi-owned login. It refuses an existing unmanaged native Pi credential instead of importing shared refresh tokens. There is no automatic account rotation or inference proxy.
 
 ## Commands
 
@@ -33,13 +33,13 @@ Email is optional, unverified display metadata obtained from a native credential
 
 ## Runtime and installation
 
-See the [README](../README.md) for package installation and maintenance activation; update and removal commands are below. The package exposes `src/cli.mjs` as `pi-accounts` and carries its sibling modules together; it has no additional npm runtime dependencies. Node.js >=22.19.0, Pi `@earendil-works/pi-coding-agent` 1.3.0 and its matching `@earendil-works/pi-ai` 1.3.0 are required. The SDK checks versions before importing native Pi primitives; these versions remain pinned until refresh-lock semantics and internal module paths are reviewed again.
+See the [README](../README.md) for package installation and maintenance activation; update and removal commands are below. The package exposes `src/cli.mjs` as `pi-accounts` and carries its sibling modules together; it has no additional npm runtime dependencies. Node.js >=22.19.0 is required. Qualified native combinations are Pi 1.1.0 with pi-ai 1.1.0/1.2.0/1.3.0, Pi 1.2.0 with pi-ai 1.2.0/1.3.0, and Pi 1.3.0 with pi-ai 1.3.0. These include native hoisted dependencies. Version and required-capability checks run before account operations; future, prerelease, incompatible or missing APIs fail closed. Real released artifacts passed native concurrency, recovery and cancellation-durability tests for every combination. Pi 1.0.0 lacks the required cancellation-durable refresh contract and is rejected.
 
 The tool searches `PATH` for the first executable `pi`, follows executable symlinks, and supports both npm installations and the [current official curl installer](https://pi.dev/install.sh)'s managed launcher. For the managed launcher, it validates `install/managed-install.json`, reads the active `install/current-version`, and follows that release's native `node_modules/.bin/pi` to its package. Custom installation roots and symlinked launchers work; discovery derives the installation from the actual command, not ambient `PI_CODING_AGENT_DIR` or `PI_MANAGED_INSTALL_ROOT`. A valid managed marker beside the command is also supported. Marker `entrypoint.path` metadata is not the active-release authority. Invalid markers, unsafe version names or a missing active release fail without selecting another Pi later on `PATH`.
 
-This supports normal Linux and macOS managed/npm layouts without a particular home prefix. `PI_PACKAGE_DIR` remains an optional intentional package binding and takes precedence over `PATH`; normal official managed discovery does not require it. Pi's OAuth dependency follows Node's package search order from the selected package, supporting both nested and hoisted npm dependencies. Discovery does not execute the launcher, run OAuth, download dependencies or change the installation. The active package and its pi-ai dependency must both be reviewed version 1.3.0. A newer installed Pi produces a compatibility error with the detected version; do not downgrade or relogin merely to repair discovery. The user's installed version cannot be inferred from the latest installer release. Synthetic tests qualify custom managed layouts and relocated npm layouts on Linux. An isolated Linux trial using the official 1.3.0 installer package/lock, its downloaded native dependencies and the exact managed launcher passed local status, empty refresh and help without a package override. Actual macOS execution remains unverified.
+This supports normal Linux and macOS managed/npm layouts without a particular home prefix. `PI_PACKAGE_DIR` remains an optional intentional package binding and takes precedence over `PATH`; normal official managed discovery does not require it. Pi's OAuth dependency follows Node's package search order from the selected package, supporting both nested and hoisted npm dependencies. Discovery does not execute the launcher, run OAuth, download dependencies or change the installation. The active package and its pi-ai dependency must form a qualified combination above. A newer installed Pi produces a compatibility error with the detected version; do not downgrade or relogin merely to repair discovery. The user's installed version cannot be inferred from the latest installer release. Synthetic tests qualify custom managed layouts and relocated npm layouts on Linux. An isolated Linux trial using the official 1.3.0 installer package/lock, its downloaded native dependencies and the exact managed launcher passed local status, empty refresh and help without a package override. Actual macOS execution remains unverified.
 
-Maintenance installed against a managed launcher records its durable managed root and resolves `current-version` afresh for each scheduled refresh. It refuses an unsupported newly active version instead of refreshing through a retained old release. Existing maintenance records and installations created with `PI_PACKAGE_DIR` remain intentionally bound to that package. Pause maintenance, wait for an active runner to finish, remove the intentional override if appropriate, and reinstall its configuration through the update procedure below to capture the managed root. Package installation and this discovery fix do not reactivate maintenance automatically.
+Maintenance installed against a managed launcher records its durable managed root and resolves `current-version` afresh for each scheduled refresh. It refuses an unsupported newly active version instead of refreshing through a retained old release. Existing maintenance records and installations created with `PI_PACKAGE_DIR` remain intentionally bound to that package. Pause maintenance, wait for an active runner to finish, remove the intentional override if appropriate, and reinstall its configuration through the update procedure below to capture the managed root. Normal npm replacement does not reactivate maintenance automatically; the update command below preserves its prior intent.
 
 `PI_CODING_AGENT_DIR` selects Pi's agent home, default `~/.pi/agent`. The CLI resolves it once through Pi's native `resolvePath`: `~` and `~/...` expand to the user home, `file://` URLs become filesystem paths, and relative paths resolve from the current working directory. The resulting absolute path is shared by reads, locks and writes; paths are not trimmed or canonicalized through symlinks. Set the same home for Pi, its subagents and this CLI. Native credentials remain in `auth.json`; saved accounts live in `accounts/pool.json`. New private directories use mode 0700 and private files use mode 0600. Existing parent-directory permissions and ACLs remain operator-owned. Installation must not copy credentials. Source-only scratch checks use:
 
@@ -53,24 +53,37 @@ Use `pi-accounts maintenance --help` and the [README](../README.md) for the nati
 
 ## Maintenance updates and removal
 
-Pause scheduling before replacing code or rebinding the Pi installation. If disable reports an active refresh, let it finish and repeat disable; it never kills a token refresh. Continue only when the runner is idle and disable succeeds:
+`pi-accounts update` resolves the latest stable public GitHub release, validates its archive, and installs it into this command's actual global npm prefix. It works without loading Pi, even when native discovery or compatibility checks currently fail. It preserves absent, paused or enabled maintenance, its captured Pi/agent-home identity, credentials and manual selection. It does not update Pi or its plugins.
+
+Updates serialize beside the installed package. An active/stale refresh returns retry guidance without killing it; finish the refresh and retry. If a refresh races with pause, scheduling stays paused and the update directory retains its original intent. After the updater and refresh are verified idle, follow the reported recovery instructions to restore that intent before retrying; a new update cannot silently adopt the temporary pause. npm failure attempts to restore the previous public package and maintenance intent. If recovery cannot finish, the private update directory retains only public tool files and recovery metadata; inspect the reported paths and instructions before retrying. Do not remove an update lock until its PID and any refresh are verified idle. The command does not coordinate arbitrary manual npm operations; keep installation work serial.
+
+For an initial upgrade from 0.1.x, or manual recovery, identify the existing global prefix (do not assume the current npm default):
+
+```bash
+PI_ACCOUNTS_PREFIX="$(node -p "require('node:path').resolve(require('node:path').dirname(require('node:fs').realpathSync(process.argv[1])), '../../../..')" "$(command -v pi-accounts)")"
+```
+
+If maintenance is installed, pause it and wait for an idle runner; never kill token rotation. Then remove its files before a manual npm replacement. Its retained ownership record keeps the captured Node, Pi installation and agent home; `--reuse-runtime` restores that validated binding without rediscovering from the current shell. Record whether scheduling was enabled or paused, and restore that intent afterward. Use the prefix resolved above:
 
 ```bash
 pi-accounts maintenance disable
 pi-accounts maintenance status
 pi-accounts maintenance uninstall
-npm install --global 'https://github.com/genzorr/pi-accounts/releases/download/v0.1.1/pi-accounts-0.1.1.tgz'
-pi-accounts maintenance install --dry-run
-pi-accounts maintenance install
+npm install --global --prefix "$PI_ACCOUNTS_PREFIX" --ignore-scripts --engine-strict https://github.com/genzorr/pi-accounts/releases/download/v0.2.0/pi-accounts-0.2.0.tgz
+pi-accounts maintenance install --reuse-runtime
+# Enable only if it was enabled before:
 pi-accounts maintenance enable
+pi-accounts maintenance status
 ```
+
+If maintenance was absent, skip its commands; if paused, leave it paused. Subsequent updates need only `pi-accounts update`. When deliberately changing Pi installation identity, use the manual pause/wait/uninstall/reinstall path so maintenance captures that new binding rather than silently redirecting it.
 
 For removal, disable and wait as above, then run:
 
 ```bash
 pi-accounts maintenance uninstall --dry-run
 pi-accounts maintenance uninstall
-npm uninstall --global pi-accounts
+npm uninstall --global --prefix "$PI_ACCOUNTS_PREFIX" pi-accounts
 ```
 
 Maintenance removal preserves credentials, selection, logs and its private pause/ownership tombstone. Modified or foreign service files remain conflicts. A stale `running/pid` marker blocks changes after a crash: inspect the PID and native service state, verify no associated refresh remains alive, then resolve that marker manually. Never remove it during token rotation. Run setup commands sequentially. Linux maintenance state lives under `~/.local/state/pi-accounts-maintenance`; macOS state lives under `~/Library/Application Support/pi-accounts/maintenance`. A sleeping or logged-out laptop cannot refresh; no wake or lingering configuration is added.
@@ -79,7 +92,7 @@ Maintenance removal preserves credentials, selection, logs and its private pause
 
 The selected credential in native `auth.json` is authoritative; pool snapshots of it are reconciled before every CLI operation. Nonselected credentials belong exclusively to the pool. The CLI serializes pool operations, then acquires Pi's existing `auth.json.lock` through `FileAuthStorageBackend.withLockAsync`; it never holds the locks in the opposite order. Pi and native subagents acquire only the native auth lock. Maintenance holds both locks while refreshing each account, and gives each network refresh fifteen seconds. Long maintenance runs can make native synchronous reloads temporarily retain their previous in-memory snapshot or make asynchronous readers wait; use an idle maintenance window if this matters.
 
-Pi 1.3.0 `pi-ai/dist/auth/resolve.js` rechecks the current stored credential inside `AuthStorage.modify`, refreshes under the native lock, and persists before releasing the lock. A stale process therefore refreshes the currently selected account, rather than writing its old snapshot over a manual switch. If native refresh already owns the lock, selection waits, saves the refreshed previous account, then switches. Synthetic tests run two real native AuthStorage processes with stale snapshots concurrently with CLI maintenance after a switch and verify the selected identity and one refresh of the selected credential.
+The qualified native `pi-ai/dist/auth/resolve.js` rechecks the current stored credential inside `AuthStorage.modify`, refreshes under the native lock, and persists before releasing the lock. A stale process therefore refreshes the currently selected account, rather than writing its old snapshot over a manual switch. If native refresh already owns the lock, selection waits, saves the refreshed previous account, then switches. Synthetic tests run two real native AuthStorage processes with stale snapshots concurrently with CLI maintenance after a switch and verify the selected identity and one refresh of the selected credential.
 
 Native `AuthStorage.readLatestData` detects changes by device/inode/size/mtime/ctime; `Models` resolves auth through that store. Subsequent native resolution can see a switch without restarting. An already-started request or connection may continue using credentials already resolved, so selection does not interrupt active work or promise a mid-turn account boundary. Stop work at idle, select, then restart/resume the Pi or T3 session for a clean boundary. Native session files are unchanged. The source and storage tests establish rereading and refresh behavior; live T3 WebSocket/session behavior and paid inference have not been tested.
 

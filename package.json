@@ -1,6 +1,6 @@
 {
   "name": "pi-accounts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Standalone Pi account selection and proactive OAuth maintenance",
   "type": "module",
@@ -15,6 +15,7 @@
     "src/cli.mjs",
     "src/pi-sdk.mjs",
     "src/maintenance.mjs",
+    "src/update.mjs",
     "docs/accounts.md",
     "LICENSE",
     "NOTICE.md",

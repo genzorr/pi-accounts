@@ -2,16 +2,16 @@
 
 Save Pi logins, see account details, select or rename accounts, check quota, and optionally refresh tokens hourly. Account switching is manual.
 
-Requires an existing Pi **1.3.0** installation and Node.js **>=22.19.0**. Official curl-managed and npm installations are supported.
+Requires Node.js **>=22.19.0** and a [supported native Pi installation](docs/accounts.md#runtime-and-installation). Official curl-managed and npm installations are supported.
 
 ## Install or update
 
 ```bash
-npm install --global 'https://github.com/genzorr/pi-accounts/releases/download/v0.1.1/pi-accounts-0.1.1.tgz'
+npm install --global 'https://github.com/genzorr/pi-accounts/releases/download/v0.2.0/pi-accounts-0.2.0.tgz'
 pi-accounts --help
 ```
 
-If maintenance is enabled, pause it and wait for an idle runner before updating; then reinstall maintenance. See [update and removal](docs/accounts.md#maintenance-updates-and-removal).
+Then use `pi-accounts update`: it installs the latest public release into the same prefix and preserves maintenance intent. For an existing 0.1.x installation, follow the one-time [upgrade procedure](docs/accounts.md#maintenance-updates-and-removal).
 
 ## Accounts
 

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runMaintenance } from '../src/maintenance.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { inspectMaintenance, runMaintenance } from '../src/maintenance.mjs';
 
 const supportedTest = ['linux', 'darwin'].includes(process.platform) ? test : test.skip;
 
@@ -235,4 +237,97 @@ supportedTest('legacy four-field maintenance state remains fixed-package intent 
   assert.equal(refreshes, 0);
   assert.equal(await f.exec(['status']), 0);
   assert.ok(f.messages.some(message => message.includes('Pi source: fixed package')));
+});
+
+supportedTest('structured inspection validates ownership without SDK or native status calls', async t => {
+  const f = fixture(t);
+  let snapshot = await inspectMaintenance(f.options);
+  assert.equal(snapshot.state, null);
+  assert.equal(snapshot.paused, false);
+  assert.equal(snapshot.running, false);
+  assert.deepEqual(f.calls, []);
+  await f.exec(['install']);
+  snapshot = await inspectMaintenance({ ...f.options, loadPi: () => { throw new Error('SDK must remain unloaded'); } });
+  assert.equal(snapshot.state.installed, true);
+  assert.deepEqual(snapshot.state.runtime, f.runtime);
+  assert.equal(snapshot.paused, true);
+  assert.deepEqual(f.calls, []);
+  writeFileSync(join(f.unitDir, 'pi-accounts-maintenance.service'), 'foreign');
+  await assert.rejects(inspectMaintenance(f.options), /Foreign or modified/);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const platform of ['linux', 'darwin']) for (const managed of [false, true]) for (const tombstone of [false, true]) supportedTest(`${platform} reuse-runtime retains ${managed ? 'managed' : 'fixed'} custom identity from ${tombstone ? 'uninstalled' : 'installed'} state despite broken discovery`, async t => {
+  const f = fixture(t, platform);
+  const retained = { ...f.runtime, ...(managed ? { managedInstallRoot: join(f.home, 'custom managed root') } : {}) };
+  f.options.runtime = retained;
+  assert.equal(await f.exec(['install']), 0);
+  if (tombstone) assert.equal(await f.exec(['uninstall']), 0);
+  const currentState = readFileSync(join(f.dir, 'state.json'));
+  const previousCalls = f.calls.length;
+  let discoveries = 0;
+  f.options.runtime = { node: '/wrong-node', cli: '/wrong-cli', piPackageDir: '/wrong-pi', agentDir: '/wrong-agent' };
+  f.options.loadPi = () => { discoveries++; throw new Error('synthetic current SDK unavailable; private details'); };
+  assert.equal(await f.exec(['install', '--reuse-runtime', '--dry-run']), 0, f.errors.join('\n'));
+  assert.deepEqual(readFileSync(join(f.dir, 'state.json')), currentState);
+  assert.equal(f.calls.length, previousCalls);
+  assert.equal(await f.exec(['install', '--reuse-runtime']), 0, f.errors.join('\n'));
+  const installed = JSON.parse(readFileSync(join(f.dir, 'state.json')));
+  assert.deepEqual(installed.runtime, retained);
+  assert.equal(installed.installed, true);
+  assert.equal(existsSync(join(f.dir, 'paused')), true);
+  assert.equal(discoveries, 0);
+  for (const name of readdirSync(f.unitDir)) {
+    const contents = readFileSync(join(f.unitDir, name), 'utf8');
+    assert.equal(contents.includes('/wrong-'), false);
+    if (!name.endsWith('.timer')) assert.equal(contents.includes(retained.cli), true);
+  }
+});
+
+supportedTest('reuse-runtime requires validated retained ownership and rejects invalid flags without discovery or native effects', async t => {
+  const f = fixture(t);
+  let discoveries = 0;
+  delete f.options.runtime;
+  f.options.loadPi = () => { discoveries++; throw new Error('must not discover'); };
+  for (const args of [['install', '--reuse-runtime'], ['install', '--reuse-runtime', '--reuse-runtime'], ['enable', '--reuse-runtime'], ['uninstall', '--reuse-runtime'], ['install', '--reuse-runtime', '--help']]) assert.equal(await f.exec(args), 1);
+  assert.equal(discoveries, 0);
+  assert.deepEqual(readdirSync(f.home), []);
+  assert.deepEqual(f.calls, []);
+  f.options.runtime = f.runtime;
+  assert.equal(await f.exec(['install']), 0);
+  const statePath = join(f.dir, 'state.json');
+  const invalid = JSON.parse(readFileSync(statePath)); invalid.runtime.agentDir = 'relative-private-location';
+  writeFileSync(statePath, JSON.stringify(invalid));
+  const before = readFileSync(statePath);
+  assert.equal(await f.exec(['install', '--reuse-runtime']), 1);
+  assert.deepEqual(readFileSync(statePath), before);
+  assert.equal(discoveries, 0);
+  assert.deepEqual(f.calls, []);
+});
+
+supportedTest('normal install intentionally rediscovers current runtime after retained installation', async t => {
+  const f = fixture(t);
+  assert.equal(await f.exec(['install']), 0);
+  delete f.options.runtime;
+  let discoveries = 0;
+  f.options.loadPi = async () => { discoveries++; return { root: '/new fixed Pi', resolvePath: () => join(f.home, 'new agent') }; };
+  assert.equal(await f.exec(['install']), 0, f.errors.join('\n'));
+  const state = JSON.parse(readFileSync(join(f.dir, 'state.json')));
+  assert.equal(discoveries, 1);
+  assert.equal(state.runtime.piPackageDir, '/new fixed Pi');
+  assert.equal(state.runtime.agentDir, join(f.home, 'new agent'));
+  assert.equal(existsSync(join(f.dir, 'paused')), true);
+});
+
+supportedTest('public reuse-runtime install preserves the custom tombstone identity with broken current Pi and a different shell agent home', async t => {
+  const f = fixture(t, process.platform);
+  f.options.runtime = { ...f.runtime, managedInstallRoot: join(f.home, 'custom managed Pi') };
+  await f.exec(['install']); await f.exec(['uninstall']);
+  const retained = JSON.parse(readFileSync(join(f.dir, 'state.json'))).runtime;
+  const wrongHome = join(f.home, 'wrong shell agent');
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), 'maintenance', 'install', '--reuse-runtime'], { encoding: 'utf8', env: { ...process.env, HOME: f.home, PI_PACKAGE_DIR: join(f.home, 'broken current Pi'), PI_CODING_AGENT_DIR: wrongHome } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.dir, 'state.json'))).runtime, retained);
+  assert.equal(existsSync(join(f.dir, 'paused')), true);
+  assert.equal(existsSync(wrongHome), false);
 });

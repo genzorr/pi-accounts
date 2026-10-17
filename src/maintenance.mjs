@@ -9,22 +9,24 @@ const owner = 'pi-accounts-maintenance-v1';
 const label = 'io.github.genzorr.pi-accounts';
 const service = 'pi-accounts-maintenance.service';
 const timer = 'pi-accounts-maintenance.timer';
-const help = `pi-accounts maintenance install [--dry-run]  Install hourly user-service files, initially paused
+const help = `pi-accounts maintenance install [--dry-run] [--reuse-runtime] Install hourly user-service files, initially paused
 pi-accounts maintenance enable             Enable hourly refresh
 pi-accounts maintenance status             Inspect installation, pause and running state
 pi-accounts maintenance disable            Pause scheduling without killing an active refresh
 pi-accounts maintenance uninstall [--dry-run] Remove unchanged owned service files; preserve accounts
 
 Linux uses systemd --user; macOS uses a user LaunchAgent. No sudo is needed.
-Install Pi 1.3.0 separately. PI_PACKAGE_DIR and PI_CODING_AGENT_DIR are retained at install.
+Install a supported Pi separately; see docs/accounts.md. PI_PACKAGE_DIR and PI_CODING_AGENT_DIR are retained at install.
+Use --reuse-runtime to retain the validated saved runtime without Pi discovery; installation remains paused.
 Before npm update/uninstall: disable maintenance, wait for any running refresh, then uninstall maintenance.`;
 
 function fail(message) { throw new Error(message); }
 function parse(argv) {
   const [command = 'help', ...flags] = argv;
   if ((['help', '--help', '-h'].includes(command) && !flags.length) || (['install', 'enable', 'status', 'disable', 'uninstall', 'run'].includes(command) && flags.length === 1 && ['--help', '-h'].includes(flags[0]))) return { command: 'help' };
-  if (!['install', 'enable', 'status', 'disable', 'uninstall', 'run'].includes(command) || flags.length > 1 || (flags.length && (!['install', 'uninstall'].includes(command) || flags[0] !== '--dry-run'))) fail('Invalid maintenance command or option; run pi-accounts maintenance help');
-  return { command, dryRun: flags[0] === '--dry-run' };
+  const allowed = command === 'install' ? ['--dry-run', '--reuse-runtime'] : command === 'uninstall' ? ['--dry-run'] : [];
+  if (!['install', 'enable', 'status', 'disable', 'uninstall', 'run'].includes(command) || flags.some(flag => !allowed.includes(flag)) || new Set(flags).size !== flags.length) fail('Invalid maintenance command or option; run pi-accounts maintenance help');
+  return { command, dryRun: flags.includes('--dry-run'), reuseRuntime: flags.includes('--reuse-runtime') };
 }
 function regular(path) {
   try {
@@ -93,8 +95,10 @@ function refresh(runtime) {
 export async function runMaintenance(argv, options = {}) {
   const log = options.log || console.log;
   try {
-    const { command, dryRun } = parse(argv);
+    const { command, dryRun, reuseRuntime } = parse(argv);
     if (command === 'help') { log(help); return 0; }
+    const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+    if (!options.updating && !['status', 'run'].includes(command) && packageRoot.endsWith('/lib/node_modules/pi-accounts') && existsSync(join(dirname(packageRoot), '.pi-accounts-update'))) fail('Maintenance update is active or requires recovery; inspect the update lock before changing scheduling');
     const platform = options.platform || process.platform;
     if (!['linux', 'darwin'].includes(platform)) fail('Maintenance supports Linux and macOS only');
     const home = resolve(options.home || homedir());
@@ -136,6 +140,12 @@ export async function runMaintenance(argv, options = {}) {
         } else if (loaded.code !== 113 && !/could not find service/i.test(loaded.stderr)) fail('Cannot determine LaunchAgent state; inspect launchctl before retrying');
       }
     };
+    if (command === 'status' && options.inspect) {
+      owned();
+      if (!state && (existsSync(paused) || existsSync(running))) fail('Unowned maintenance control files exist; preserve and inspect them');
+      options.inspect({ state, paused: existsSync(paused), running: existsSync(running), dir });
+      return 0;
+    }
     if (command === 'status') {
       log(`Maintenance: ${state?.installed ? 'installed' : 'not installed'}; scheduling ${existsSync(paused) ? 'paused' : 'not paused'}; runner ${existsSync(running) ? 'active or stale marker (inspect before removal)' : 'idle'}`);
       if (state) {
@@ -170,7 +180,8 @@ export async function runMaintenance(argv, options = {}) {
     }
     const current = owned();
     if (command === 'install') {
-      let runtime = options.runtime;
+      if (reuseRuntime && !state) fail('Maintenance has no retained runtime; install maintenance normally first');
+      let runtime = reuseRuntime ? state.runtime : options.runtime;
       if (!runtime) {
         const loadPi = await sdkLoader(options);
         const sdk = await loadPi();
@@ -234,4 +245,12 @@ export async function runMaintenance(argv, options = {}) {
     (options.error || console.error)(message);
     return 1;
   }
+}
+
+export async function inspectMaintenance(options = {}) {
+  let snapshot;
+  let message;
+  const code = await runMaintenance(['status'], { ...options, inspect: value => { snapshot = value; }, error: value => { message = value; } });
+  if (code !== 0) throw new Error(message);
+  return snapshot;
 }

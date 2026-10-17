@@ -9,8 +9,7 @@ import { setTimeout } from 'node:timers/promises';
 import { Accounts, atomicWrite, PROVIDER } from '../src/accounts.mjs';
 import { loadPi } from '../src/pi-sdk.mjs';
 
-const { FileAuthStorageBackend: Backend, AuthStorage, resolvePath, aiRoot } = await loadPi();
-const { refreshStoredOAuthCredential } = await import(pathToFileURL(join(aiRoot, 'dist/auth/resolve.js')));
+const { FileAuthStorageBackend: Backend, AuthStorage, resolvePath, refreshStoredOAuthCredential } = await loadPi();
 const credential = (id, expires = Date.now()) => ({ type: 'oauth', accountId: id, access: `synthetic-${id}`, refresh: `synthetic-refresh-${id}`, expires });
 async function fixture(options = {}) {
   const home = await mkdtemp(join(tmpdir(), 'pi-accounts-test-'));
@@ -336,4 +335,50 @@ test('failed rename persistence preserves the active credentials and releases it
   await accounts.rename('a', 'personal');
   assert.equal((await accounts.status())[0].selected, true);
   assert.equal(await readFile(accounts.authPath, 'utf8'), authBefore);
+});
+
+test('native refresh persists a rotated credential when its caller aborts after provider refresh starts', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  const storage = AuthStorage.create(accounts.authPath);
+  const controller = new AbortController();
+  let entered;
+  let complete;
+  const started = new Promise(resolve => { entered = resolve; });
+  const finish = new Promise(resolve => { complete = resolve; });
+  const pending = refreshStoredOAuthCredential(storage, PROVIDER, { refresh: async (current, signal) => {
+    entered(signal);
+    await finish;
+    signal.throwIfAborted();
+    return { ...current, refresh: 'synthetic-cancellation-rotated', expires: Date.now() + 8 * 3600000 };
+  } }, () => true, controller.signal);
+  const providerSignal = await started;
+  controller.abort();
+  complete();
+  await pending;
+  assert.equal(providerSignal.aborted, false);
+  assert.equal((await json(accounts.authPath))[PROVIDER].refresh, 'synthetic-cancellation-rotated');
+  assert.deepEqual((await accounts.status()).map(row => row.selected), [true, false]);
+});
+
+test('native refresh cancellation before acquiring the credential lock never calls the provider', async () => {
+  const { accounts } = await fixture();
+  await accounts.select('a');
+  const storage = AuthStorage.create(accounts.authPath);
+  const original = await readFile(accounts.authPath, 'utf8');
+  let entered;
+  let release;
+  const acquired = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const holder = new Backend(accounts.authPath).withLockAsync(async () => { entered(); await held; return { result: undefined }; });
+  await acquired;
+  let providerCalls = 0;
+  const controller = new AbortController();
+  try {
+    const pending = refreshStoredOAuthCredential(storage, PROVIDER, { refresh: async current => { providerCalls++; return current; } }, () => true, controller.signal);
+    controller.abort();
+    await assert.rejects(pending);
+    assert.equal(providerCalls, 0);
+    assert.equal(await readFile(accounts.authPath, 'utf8'), original);
+  } finally { release(); await holder; }
 });

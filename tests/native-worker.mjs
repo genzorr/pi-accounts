@@ -1,12 +1,10 @@
 import { writeFile, access } from 'node:fs/promises';
 import { setTimeout } from 'node:timers/promises';
-import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { loadPi } from '../src/pi-sdk.mjs';
 
 const [home, ready, go] = process.argv.slice(2);
-const { AuthStorage, aiRoot } = await loadPi();
-const { refreshStoredOAuthCredential } = await import(pathToFileURL(join(aiRoot, 'dist/auth/resolve.js')));
+const { AuthStorage, refreshStoredOAuthCredential } = await loadPi();
 const storage = AuthStorage.create(join(home, 'auth.json'));
 await storage.read('openai-codex');
 await writeFile(ready, 'ready');

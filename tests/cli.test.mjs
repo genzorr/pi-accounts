@@ -18,10 +18,11 @@ async function fixture(t) {
   const save = async (path, text) => { await mkdir(join(sdk, path, '..'), { recursive: true }); await writeFile(join(sdk, path), text); };
   await save('package.json', JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '1.3.0', type: 'module' }));
   const marker = `import { appendFileSync } from 'node:fs'; const mark = text => appendFileSync(process.env.PI_AUDIT_TRACE, text + '\\n');`;
-  await save('dist/core/auth-storage.js', `${marker}\nimport { readFile } from 'node:fs/promises';\nmark('sdk:auth');\nexport class FileAuthStorageBackend { constructor(path) { this.path = path; mark('storage:construct'); } async withLockAsync(fn) { mark('storage:read'); let data = ''; try { data = await readFile(this.path, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; } return (await fn(data)).result; } }\nexport class AuthStorage {}\n`);
+  await save('dist/core/auth-storage.js', `${marker}\nimport { readFile } from 'node:fs/promises';\nmark('sdk:auth');\nexport class FileAuthStorageBackend { constructor(path) { this.path = path; mark('storage:construct'); } withLock() {} async withLockAsync(fn) { mark('storage:read'); let data = ''; try { data = await readFile(this.path, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; } return (await fn(data)).result; } }\nexport class AuthStorage { static create() {} read() {} modify() {} }\n`);
   await save('dist/utils/paths.js', `${marker}\nimport { resolve } from 'node:path'; mark('sdk:paths'); export const resolvePath = resolve;\n`);
   await save('node_modules/@earendil-works/pi-ai/package.json', '{"name":"@earendil-works/pi-ai","version":"1.3.0","type":"module"}');
   await save('node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js', `${marker}\nmark('sdk:oauth');\nfunction credential() { return { type: 'oauth', access: process.env.PI_SYNTHETIC_ACCESS || 'synthetic-access', refresh: 'synthetic-refresh', expires: Date.now() + 8 * 3600000, accountId: process.env.PI_SYNTHETIC_ID || 'synthetic-account' }; }\nexport const openaiCodexOAuth = { async login(interaction) { mark('provider:login'); if (process.env.PI_SYNTHETIC_LOGIN_ERROR) throw new Error('synthetic-private-provider-error'); mark('method:' + await interaction.prompt({ type: 'select' })); return credential(); }, async refresh() { mark('provider:refresh'); return credential(); } };\n`);
+  await save('node_modules/@earendil-works/pi-ai/dist/auth/resolve.js', 'export async function refreshStoredOAuthCredential() {}');
   await save('fetch.mjs', `${marker}\nglobalThis.fetch = async () => { mark('provider:usage'); return { ok: true, json: async () => ({ access_token: 'synthetic-private-response', rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 42, reset_at: 2000000000 } } }) }; };\n`);
   const env = { ...process.env, PI_PACKAGE_DIR: sdk, PI_CODING_AGENT_DIR: home, PI_AUDIT_TRACE: trace };
   const run = (args, extra = {}) => spawnSync(process.execPath, ['--import', join(sdk, 'fetch.mjs'), cli, ...args], { env: { ...env, ...extra }, encoding: 'utf8' });
@@ -224,7 +225,7 @@ test('managed discovery follows current-version updates and rejects an incompati
   await writeFile(join(managed.root, 'current-version'), '1.4.0\n');
   const result = managed.run(['status', '--json']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /reviewed Pi 1.3.0; found 1.4.0/);
+  assert.match(result.stderr, /reviewed Pi 1.1.0, 1.2.0, 1.3.0; found 1.4.0/);
   assert.equal(await f.calls(), '');
 });
 
@@ -291,12 +292,12 @@ test('incompatible Pi dependencies and an unsupported PATH wrapper fail before S
   await writeFile(join(f.sdk, 'node_modules', '@earendil-works', 'pi-ai', 'package.json'), '{"name":"@earendil-works/pi-ai","version":"1.4.0","type":"module"}');
   let result = f.run(['status']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /reviewed pi-ai 1.3.0/);
+  assert.match(result.stderr, /reviewed Pi\/pi-ai release combination/);
   assert.equal(await f.calls(), '');
   await writeFile(join(f.sdk, 'package.json'), '{"name":"@earendil-works/pi-coding-agent","version":"1.4.0","type":"module"}');
   result = f.run(['status']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /reviewed Pi 1.3.0/);
+  assert.match(result.stderr, /reviewed Pi 1.1.0, 1.2.0, 1.3.0/);
   assert.equal(await f.calls(), '');
   const bin = join(f.root, 'wrapper-bin');
   await mkdir(bin);
@@ -330,4 +331,13 @@ test('maintenance dispatch is lazy and preserves arguments and the module exit c
   assert.match(await f.calls(), /maintenance:args:\["run","--json"\]/);
   assert.equal((await f.calls()).includes('sdk:'), false);
   assert.equal((await f.calls()).includes('provider:'), false);
+});
+
+test('update dispatch preserves arguments and exit status without loading the SDK', async t => {
+  const f = await fixture(t);
+  const command = await installedCli(f.root);
+  await writeFile(join(command, '..', 'update.mjs'), `import { appendFileSync } from 'node:fs';\nexport async function runUpdate(argv) { appendFileSync(process.env.PI_AUDIT_TRACE, JSON.stringify(argv)); return 9; }\n`);
+  const result = spawnSync(process.execPath, [command, 'update', '--unexpected'], { env: f.env, encoding: 'utf8' });
+  assert.equal(result.status, 9, result.stderr);
+  assert.equal(await f.calls(), '["--unexpected"]');
 });
